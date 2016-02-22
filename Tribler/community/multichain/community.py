@@ -37,7 +37,6 @@ CRAWL_RESUME = u"crawl_resume"
 # Divide by this to convert from bytes to MegaBytes.
 MEGA_DIVIDER = 1024 * 1024
 
-
 class MultiChainCommunity(Community):
     """
     Community for reputation based on MultiChain tamper proof interaction history.
@@ -202,6 +201,8 @@ class MultiChainCommunity(Community):
         # TODO: This code always signs a request. Checks and rejects should be inserted here!
         # TODO: Like basic total_up == previous_total_up + block.up or more sophisticated chain checks.
         payload = message.payload
+        validation_result = self.persistence.validate(message.authentication.member.public_key, payload.sequence_number_requester, payload.up, payload.down, payload.total_up_requester, payload.total_down_requester, payload.previous_hash_requester)
+        self.logger.info("Signature request validation result: %s" % validation_result)
 
         """ The up and down values are reversed for the responder. """
         total_up_responder, total_down_responder = self._get_next_total(payload.down, payload.up)
@@ -239,12 +240,11 @@ class MultiChainCommunity(Community):
         else:
             # TODO: Check whether we are expecting a response
             self.logger.info("Signature response received. Modified: %s" % modified)
+            validation_result = self.persistence.validate(response.authentication.members[1].public_key, response.payload.sequence_number_requester, response.payload.down, response.payload.up, response.payload.total_up_requester, response.payload.total_down_requester, response.payload.previous_hash_requester)
+            self.logger.info("Signature response validation result: %s" % validation_result)
 
-            if request.payload.sequence_number_requester == response.payload.sequence_number_requester and \
-               request.payload.previous_hash_requester == response.payload.previous_hash_requester and modified:
-                return True
-            else:
-                return False
+            return request.payload.sequence_number_requester == response.payload.sequence_number_requester and \
+               request.payload.previous_hash_requester == response.payload.previous_hash_requester and modified
 
     def received_signature_response(self, messages):
         """
@@ -288,9 +288,9 @@ class MultiChainCommunity(Community):
 
     def send_crawl_request(self, candidate, sequence_number=None):
         if sequence_number is None:
-            sequence_number = self.persistence.get_latest_sequence_number(candidate.get_member().mid)
+            sequence_number = self.persistence.get_latest_sequence_number(candidate.get_member().public_key)
         self.logger.info("Crawler: Requesting crawl from node %s, from sequence number %d" %
-                         (base64.encodestring(candidate.get_member().mid).strip(), sequence_number))
+                         (base64.encodestring(candidate.get_member().public_key).strip(), sequence_number))
         meta = self.get_meta_message(CRAWL_REQUEST)
         message = meta.impl(authentication=(self.my_member,),
                             distribution=(self.claim_global_time(),),
@@ -301,7 +301,7 @@ class MultiChainCommunity(Community):
     def received_crawl_request(self, messages):
         for message in messages:
             self.logger.info("Crawler: Received crawl request from node %s, from sequence number %d" %
-                             (base64.encodestring(message.candidate.get_member().mid).strip(),
+                             (base64.encodestring(message.candidate.get_member().public_key).strip(),
                               message.payload.requested_sequence_number))
             self.crawl_requested(message.candidate, message.payload.requested_sequence_number)
 
@@ -317,9 +317,6 @@ class MultiChainCommunity(Community):
             self.dispersy.store_update_forward(messages, False, False, True)
             if len(blocks) > 1:
                 # we sent more than 1 block. Send a resumption token so the other side knows it should continue crawling
-                # last_block = blocks[-1]
-                # resumption_number = last_block.sequence_number_requster if
-                # last_block.mid_requester == self._mid else last_block.sequence_number_responder
                 message = self.get_meta_message(CRAWL_RESUME).impl(authentication=(self.my_member,),
                                                                    distribution=(self.claim_global_time(),),
                                                                    destination=(candidate,),

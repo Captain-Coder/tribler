@@ -1,8 +1,9 @@
 """
-File containing utilities used in testing the double entry community.
+File containing utilities used in testing the MultiChain community.
 """
 
 import random
+from struct import pack
 
 from hashlib import sha256
 
@@ -12,6 +13,8 @@ from Tribler.Test.test_as_server import AbstractServer
 
 from Tribler.community.multichain.conversion import EMPTY_HASH
 from Tribler.community.multichain.database import DatabaseBlock
+from Tribler.community.multichain.conversion import requester_half_format, crawl_response_format
+
 
 
 class TestBlock(DatabaseBlock):
@@ -20,43 +23,61 @@ class TestBlock(DatabaseBlock):
     Also used in other test files for MultiChain.
     """
 
-    def __init__(self):
+    def __init__(self, previous=None):
         crypto = ECCrypto()
-        key_requester = crypto.generate_key(u"curve25519")
-        key_responder = crypto.generate_key(u"curve25519")
 
-        # Random payload but unique numbers.
-        sequence_number_requester = random.randint(50, 100)
-        sequence_number_responder = random.randint(101, 200)
         up = random.randint(201, 220)
         down = random.randint(221, 240)
-        total_up_requester = random.randint(241, 260)
-        total_down_requester = random.randint(261, 280)
-        total_up_responder = random.randint(281, 300)
-        total_down_responder = random.randint(301, 320)
 
-        # A random hash is generated for the previous hash. It is only used to test if a hash can be persisted.
-        previous_hash_requester = sha256(str(random.randint(0, 100000))).digest()
-        public_key_requester = crypto.key_to_bin(key_requester.pub())
-        signature_requester = crypto.create_signature(key_requester, encode_signing_format(
+        if previous:
+            # flip requester and responder
+            self.key_requester = previous.key_responder
+            self.key_responder = previous.key_requester
+            sequence_number_requester = previous.sequence_number_responder + 1
+            sequence_number_responder = previous.sequence_number_requester + 1
+            total_up_requester = previous.total_up_responder + up
+            total_down_requester = previous.total_down_responder + down
+            total_up_responder = previous.total_up_requester + down
+            total_down_responder = previous.total_down_requester + up
+            previous_hash_requester = previous.hash_responder
+            previous_hash_responder = previous.hash_requester
+        else:
+            self.key_requester = crypto.generate_key(u"curve25519")
+            self.key_responder = crypto.generate_key(u"curve25519")
+            sequence_number_requester = random.randint(50, 100)
+            sequence_number_responder = random.randint(101, 200)
+            total_up_requester = random.randint(241, 260)
+            total_down_requester = random.randint(261, 280)
+            total_up_responder = random.randint(281, 300)
+            total_down_responder = random.randint(301, 320)
+            previous_hash_requester = sha256(str(random.randint(0, 100000))).digest()
+            previous_hash_responder = sha256(str(random.randint(100001, 200000))).digest()
+
+        public_key_requester = crypto.key_to_bin(self.key_requester.pub())
+        signature_requester = crypto.create_signature(self.key_requester, encode_signing_format(
            [up, down,
             total_up_requester, total_down_requester,
             sequence_number_requester, previous_hash_requester]))
-        # A random hash is generated for the  hash.
-        # TODO: Use the actual hash
-        hash_requester = sha256(str(random.randint(0, 100000))).digest()
-        # A random hash is generated for the previous hash. It is only used to test if a hash can be persisted.
-        previous_hash_responder = sha256(str(random.randint(100001, 200000))).digest()
-        public_key_responder = crypto.key_to_bin(key_responder.pub())
-        signature_responder = crypto.create_signature(key_responder, encode_signing_format(
+        public_key_responder = crypto.key_to_bin(self.key_responder.pub())
+        signature_responder = crypto.create_signature(self.key_responder, encode_signing_format(
             [up, down,
              total_up_requester, total_down_requester,
              sequence_number_requester, previous_hash_requester,
              total_up_responder, total_down_responder,
              sequence_number_responder, previous_hash_responder]))
-        # A random hash is generated for the  hash.
-        # TODO: Use the actual hash
-        hash_responder = sha256(str(random.randint(0, 100000))).digest()
+
+        hash_requester = sha256(pack(requester_half_format, public_key_requester, public_key_responder,
+                                     up, down,
+                                     total_up_requester, total_down_requester,
+                                     sequence_number_requester, previous_hash_requester,
+                                     signature_requester)).digest()
+        hash_responder = sha256(pack(crawl_response_format, up, down,
+                                     total_up_requester, total_down_requester,
+                                     sequence_number_requester, previous_hash_requester,
+                                     total_up_responder, total_down_responder,
+                                     sequence_number_responder, previous_hash_responder,
+                                     public_key_requester, signature_requester,
+                                     public_key_responder, signature_responder)).digest()
 
         DatabaseBlock.__init__(self,
                                (public_key_requester, public_key_responder, up, down,
@@ -71,23 +92,39 @@ class TestBlock(DatabaseBlock):
 
                                 None))
 
-    def generate_requester(self):
-        return [self.up, self.down,
-                self.total_up_requester, self.total_down_requester,
-                self.sequence_number_requester, self.previous_hash_requester]
+#    def generate_common_part(self):
+#        return [self.public_key_requester, self.public_key_responder, self.up, self.down]
+#
+#    def generate_requester(self):
+#        return [self.up, self.down,
+#                self.total_up_requester, self.total_down_requester,
+#                self.sequence_number_requester, self.previous_hash_requester]
+#
+#    def _generate_responder(self):
+#        return [self.total_up_responder, self.total_down_responder,
+#                self.sequence_number_responder, self.previous_hash_responder]
+#
+#    def generate_signature_payload(self):
+#        return self.generate_requester() + self._generate_responder()
+#
+#    def generate_block_payload(self):
+#        return self.generate_requester() + self._generate_responder() + [self.public_key_requester,
+#                                                                         self.signature_requester,
+#                                                                         self.public_key_responder,
+#                                                                         self.signature_responder]
 
-    def _generate_responder(self):
-        return [self.total_up_responder, self.total_down_responder,
-                self.sequence_number_responder, self.previous_hash_responder]
-
-    def generate_signature_payload(self):
-        return self.generate_requester() + self._generate_responder()
-
-    def generate_block_payload(self):
-        return self.generate_requester() + self._generate_responder() + [self.public_key_requester,
-                                                                         self.signature_requester,
-                                                                         self.public_key_responder,
-                                                                         self.signature_responder]
+    @classmethod
+    def half_signed(cls):
+        """
+        Create a half_signed TestBlock
+        """
+        block = cls()
+        block.previous_hash_responder = EMPTY_HASH
+        block.sequence_number_responder = 0
+        block.signature_responder = ''
+        block.total_down_responder = 0
+        block.total_up_responder = 0
+        return block
 
 
 class MultiChainTestCase(AbstractServer):

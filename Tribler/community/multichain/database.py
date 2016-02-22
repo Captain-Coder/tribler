@@ -7,6 +7,9 @@ from Tribler.dispersy.database import Database
 from Tribler.community.multichain.conversion import encode_block, encode_block_requester_half, encode_block_crawl,\
     EMPTY_HASH
 
+# ID of the first block of the chain.
+GENESIS_ID = '0' * 20
+
 DATABASE_DIRECTORY = path.join(u"sqlite")
 """ Path to the database location + dispersy._workingdirectory"""
 DATABASE_PATH = path.join(DATABASE_DIRECTORY, u"multichain.db")
@@ -178,11 +181,12 @@ class MultiChainDB(Database):
         # Create a DB Block or return None
         return self._create_database_block(db_result)
 
-    def get_blocks_since(self, public_key, sequence_number):
+    def get_blocks_since(self, public_key, sequence_number, limit=100):
         """
         Returns database blocks with sequence number higher than or equal to sequence_number, at most 100 results
         :param public_key: The public key corresponding to the member id
         :param sequence_number: The linear block number
+        :param limit: Optional limit on the number of blocks to fetch. Defaults to 100
         :return A list of DB Blocks that match the criteria
         """
         db_query = u"SELECT public_key_requester, public_key_responder, up, down, " \
@@ -198,8 +202,33 @@ class MultiChainDB(Database):
                    u" public_key_responder AS public_key FROM `multi_chain`) " \
                    u"WHERE sequence_number >= ? AND public_key = ? " \
                    u"ORDER BY sequence_number ASC "\
-                   u"LIMIT 100"
-        db_result = self.execute(db_query, (sequence_number, buffer(public_key))).fetchall()
+                   u"LIMIT ?"
+        db_result = self.execute(db_query, (sequence_number, buffer(public_key), limit)).fetchall()
+        return [self._create_database_block(db_item) for db_item in db_result]
+
+    def get_blocks_until(self, public_key, sequence_number, limit=100):
+        """
+        Returns database blocks with sequence number lower than or equal to sequence_number, at most 100 results
+        :param public_key: The public key corresponding to the member id
+        :param sequence_number: The linear block number
+        :param limit: Optional limit on the number of blocks to fetch. Defaults to 100
+        :return A list of DB Blocks that match the criteria
+        """
+        db_query = u"SELECT public_key_requester, public_key_responder, up, down, " \
+                   u"total_up_requester, total_down_requester, sequence_number_requester, previous_hash_requester, " \
+                   u"signature_requester, hash_requester, " \
+                   u"total_up_responder, total_down_responder, sequence_number_responder, previous_hash_responder, " \
+                   u"signature_responder, hash_responder, insert_time " \
+                   u"FROM (" \
+                   u"SELECT *, sequence_number_requester AS sequence_number, " \
+                   u" public_key_requester AS public_key FROM `multi_chain` " \
+                   u"UNION " \
+                   u"SELECT *, sequence_number_responder AS sequence_number, " \
+                   u" public_key_responder AS public_key FROM `multi_chain`) " \
+                   u"WHERE sequence_number <= ? AND public_key = ? " \
+                   u"ORDER BY sequence_number DESC "\
+                   u"LIMIT ?"
+        db_result = self.execute(db_query, (sequence_number, buffer(public_key), limit)).fetchall()
         return [self._create_database_block(db_item) for db_item in db_result]
 
     def _create_database_block(self, db_result):
@@ -267,6 +296,86 @@ class MultiChainDB(Database):
         return (db_result[0], db_result[1]) if db_result[0] is not None and db_result[1] is not None \
             else (-1, -1)
 
+    def validate(self, public_key, seq, up, down, t_up, t_down, prev_hash):
+        """
+        Check if block parameters violate what we know about a certain member
+        :param public_key: The member information to check
+        :param seq: The block sequence number
+        :param up: Uploaded by the member
+        :param down: Downloaded by the member
+        :param t_up: Total uploaded by the member
+        :param t_down: Total downloaded by the member
+        :param prev_hash: The previous hash of the block being checked
+        :return: "valid" if the values do not violate the rules,
+                 "partial-next" if the values do not violate, but there are unknown blocks in the future
+                 "partial-prev" if the values do not violate, but there are unknown blocks in the past
+                 "partial" if the values do not violate, but there are unknown blocks on either side.
+                 "invalid" if the values violate any of the rules,
+                 "no-data" if there is not enough information known about the member to validate
+        """
+        blk = self.get_by_public_key_and_sequence_number(public_key, seq)
+        if blk and (blk.public_key_requester == blk.public_key_responder or
+                blk.public_key_requester == public_key and (
+                                blk.up != up or blk.down != down or
+                                blk.sequence_number_requester != seq or
+                                blk.total_up_requester != t_up or
+                                blk.total_down_requester != t_down or
+                                blk.previous_hash_requester != prev_hash
+                            ) or
+                blk.public_key_responder == public_key and (
+                                blk.up != down or blk.down != up or
+                                blk.sequence_number_responder != seq or
+                                blk.total_up_responder != t_up or
+                                blk.total_down_responder != t_down or
+                                blk.previous_hash_responder != prev_hash
+                            )):
+            # the block exists in the database but the values do not agree
+            return "invalid"
+
+        if seq == 1 and prev_hash != GENESIS_ID:
+            return "invalid"
+        elif seq != 1 and prev_hash == GENESIS_ID:
+            return "invalid"
+
+        prev_blk = (self.get_blocks_until(public_key, seq - 1, limit=1) or [None])[0]
+        next_blk = (self.get_blocks_since(public_key, seq + 1, limit=1) or [None])[0]
+        result = "valid"
+        if not prev_blk and not next_blk:
+            # No blocks found, there is no info to base on
+            result = "no-info"
+        elif not next_blk:
+            # The next block does not exist in the database, at best our result can now be partial w.r.t. next
+            result = "partial-next"
+            if prev_blk.public_key_requester == public_key and prev_blk.sequence_number_requester != seq - 1 or \
+                prev_blk.public_key_responder == public_key and prev_blk.sequence_number_responder != seq - 1:
+                # If both sides are unknown or non-contiguous return a full partial result.
+                result = "partial"
+        elif not prev_blk and seq != 1:
+            # The previous block does not exist in the database, at best our result can now be partial w.r.t. prev
+            result = "partial-prev"
+            if next_blk.public_key_requester == public_key and next_blk.sequence_number_requester != seq + 1 or \
+                next_blk.public_key_responder == public_key and next_blk.sequence_number_responder != seq + 1:
+                # If both sides are unknown or non-contiguous return a full partial result.
+                result = "partial"
+
+        if prev_blk and (
+                (prev_blk.public_key_requester == public_key and (prev_blk.total_up_requester + up > t_up or
+                        prev_blk.total_down_requester + down > t_down or
+                        (prev_blk.sequence_number_requester == seq - 1 and prev_blk.hash_requester != prev_hash)))
+             or (prev_blk.public_key_responder == public_key and (prev_blk.total_up_responder + up > t_up or
+                        prev_blk.total_down_responder + down > t_down or
+                        (prev_blk.sequence_number_responder == seq - 1 and prev_blk.hash_responder != prev_hash)))):
+            result = "invalid"
+
+        if next_blk and (
+                (next_blk.public_key_requester == public_key and (t_up + next_blk.up > next_blk.total_up_requester or
+                        t_down + next_blk.down > next_blk.total_down_requester))
+             or (next_blk.public_key_responder == public_key and (t_up + next_blk.down > next_blk.total_up_responder or
+                        t_down + next_blk.up > next_blk.total_down_responder))):
+            result = "invalid"
+
+        return result
+
     def open(self, initial_statements=True, prepare_visioning=True):
         return super(MultiChainDB, self).open(initial_statements, prepare_visioning)
 
@@ -289,7 +398,6 @@ class MultiChainDB(Database):
             self.commit()
 
         return LATEST_DB_VERSION
-
 
 class DatabaseBlock:
     """ DataClass for a multichain block. """

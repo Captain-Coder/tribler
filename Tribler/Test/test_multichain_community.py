@@ -238,37 +238,6 @@ class TestMultiChainCommunity(DispersyTestFunc):
         block = other.call(other.community.persistence.get_latest_block, other.community._public_key)
         self.assertNotEquals(block.hash_responder, EMPTY_HASH)
 
-    def test_receive_signature_response(self):
-        """
-        Test the community to receive a signature request message.
-        """
-        # Arrange
-        node, other = self.create_nodes(2)
-        other.send_identity(node)
-        target_other = self._create_target(node, other)
-        node.call(node.community.publish_signature_request_message, target_other, 10, 5)
-        # Assert: Block should now be in the database of the node as halfsigned
-        block = node.call(node.community.persistence.get_latest_block, node.community._public_key)
-        self.assertEquals(block.hash_responder, EMPTY_HASH)
-        # Ignore source, as it is a Candidate. We need to use DebugNodes in test.
-        _, signature_request = other.receive_message(names=[u"dispersy-signature-request"]).next()
-        # Act
-        other.give_message(signature_request, node)
-        """ Return the response. """
-        # Ignore source, as it is a Candidate. We need to use DebugNodes in test.
-        _, signature_response = node.receive_message(names=[u"dispersy-signature-response"]).next()
-        node.give_message(signature_response, node)
-        # Assert
-        self.assertTrue(self.assertBlocksInDatabase(other, 1))
-        self.assertTrue(self.assertBlocksInDatabase(node, 1))
-        self.assertTrue(self.assertBlocksAreEqual(node, other))
-
-        block = node.call(node.community.persistence.get_latest_block, node.community._public_key)
-        self.assertNotEquals(block.hash_responder, EMPTY_HASH)
-
-        block = other.call(other.community.persistence.get_latest_block, other.community._public_key)
-        self.assertNotEquals(block.hash_responder, EMPTY_HASH)
-
     def test_block_values(self):
         """
         If a block is created between two nodes both

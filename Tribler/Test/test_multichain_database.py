@@ -2,13 +2,16 @@ import unittest
 import datetime
 import os
 from math import pow
+import random
+
+from hashlib import sha1
 
 from Tribler.dispersy.crypto import ECCrypto
 
 from Tribler.Test.test_multichain_utilities import TestBlock, MultiChainTestCase
 from Tribler.community.multichain.database import MultiChainDB
 from Tribler.community.multichain.database import DATABASE_DIRECTORY
-
+from Tribler.community.multichain.community import GENESIS_ID
 
 class TestDatabase(MultiChainTestCase):
     """
@@ -46,6 +49,26 @@ class TestDatabase(MultiChainTestCase):
         path = os.path.join(self.getStateDir(), DATABASE_DIRECTORY)
         if not os.path.exists(path):
             os.makedirs(path)
+
+    def setup_validate(self, db, dispersy):
+        block1 = TestBlock()
+        block1.sequence_number_requester = 1
+        block1.sequence_number_responder = 1
+        block1.previous_hash_requester = GENESIS_ID
+        block1.previous_hash_responder = GENESIS_ID
+        block1.total_up_requester = block1.up
+        block1.total_down_requester = block1.down
+        block1.total_up_responder = block1.down
+        block1.total_down_responder = block1.up
+        block2 = TestBlock(previous=block1)
+        block3 = TestBlock(previous=block2)
+        block4 = TestBlock()
+        return block1, block2, block3, block4
+
+    def validate_block(self, db, block):
+        result_a = db.validate(block.public_key_requester, block.sequence_number_requester, block.up, block.down, block.total_up_requester, block.total_down_requester, block.previous_hash_requester)
+        result_b = db.validate(block.public_key_responder, block.sequence_number_responder, block.down, block.up, block.total_up_responder, block.total_down_responder, block.previous_hash_responder)
+        return result_a, result_b
 
     def test_add_block(self):
         # Arrange
@@ -192,7 +215,6 @@ class TestDatabase(MultiChainTestCase):
         self.assertEquals(db.get_latest_hash(block2.public_key_requester), block2.hash_requester)
 
     def test_get_by_sequence_number_by_mid_not_existing(self):
-
         # Arrange
         dispersy = self.MockDispersy()
         db = MultiChainDB(dispersy, self.getStateDir())
@@ -297,6 +319,262 @@ class TestDatabase(MultiChainTestCase):
         self.assertLess(time_difference.seconds, 10,
                         "Difference in stored and retrieved time is too large.")
 
+    def test_validate_existing(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "valid")
+        self.assertEqual(b, "valid")
+
+    def test_validate(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "valid")
+        self.assertEqual(b, "valid")
+
+    def test_validate_no_info(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (_, _, _, block4) = self.setup_validate(db, dispersy)
+        db.add_block(block4)
+        # Act
+        (a, b) = self.validate_block(db, block4)
+        # Assert
+        self.assertEqual(a, "no-info")
+        self.assertEqual(b, "no-info")
+
+    def test_validate_partial_prev(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (_, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "partial-prev")
+        self.assertEqual(b, "partial-prev")
+
+    def test_validate_partial_next(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (_, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        (a, b) = self.validate_block(db, block3)
+        # Assert
+        self.assertEqual(a, "partial-next")
+        self.assertEqual(b, "partial-next")
+
+    def test_validate_partial(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, _, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        (a, b) = self.validate_block(db, block3)
+        # Assert
+        self.assertEqual(a, "partial")
+        self.assertEqual(b, "partial")
+
+    def test_invalid_existing_up(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        block2.up += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_existing_down(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        block2.down += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_existing_tup(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        block2.total_up_requester += 10
+        block2.total_up_responder += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_existing_tdown(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        block2.total_down_requester += 10
+        block2.total_down_responder += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_existing_hash(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block2)
+        db.add_block(block3)
+        # Act
+        block2.previous_hash_requester = sha1(str(random.randint(0, 100000))).digest()
+        block2.previous_hash_responder = sha1(str(random.randint(0, 100000))).digest()
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_seq_not_genesis(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, _, _, _) = self.setup_validate(db, dispersy)
+        # Act
+        block1.previous_hash_requester = sha1(str(random.randint(0, 100000))).digest()
+        block1.previous_hash_responder = sha1(str(random.randint(0, 100000))).digest()
+        (a, b) = self.validate_block(db, block1)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_seq_genesis(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        block2.previous_hash_requester = GENESIS_ID
+        block2.previous_hash_responder = GENESIS_ID
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_up(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        block2.up += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_down(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        block2.down += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_tup(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        block2.total_up_requester += 10
+        block2.total_up_responder += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_tdown(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        block2.total_down_requester += 10
+        block2.total_down_responder += 10
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
+
+    def test_invalid_hash(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, block2, block3, _) = self.setup_validate(db, dispersy)
+        db.add_block(block1)
+        db.add_block(block3)
+        # Act
+        block2.previous_hash_requester = sha1(str(random.randint(0, 100000))).digest()
+        block2.previous_hash_responder = sha1(str(random.randint(0, 100000))).digest()
+        (a, b) = self.validate_block(db, block2)
+        # Assert
+        self.assertEqual(a, "invalid")
+        self.assertEqual(b, "invalid")
 
 if __name__ == '__main__':
     unittest.main()
