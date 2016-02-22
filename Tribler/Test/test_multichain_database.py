@@ -52,8 +52,8 @@ class TestDatabase(MultiChainTestCase):
 
     def setup_validate(self, db, dispersy):
         block1 = TestBlock()
-        block1.sequence_number_requester = 1
-        block1.sequence_number_responder = 1
+        block1.sequence_number_requester = 0
+        block1.sequence_number_responder = 0
         block1.previous_hash_requester = GENESIS_ID
         block1.previous_hash_responder = GENESIS_ID
         block1.total_up_requester = block1.up

@@ -330,19 +330,23 @@ class MultiChainDB(Database):
                                 blk.previous_hash_responder != prev_hash
                             )):
             # the block exists in the database but the values do not agree
-            return "invalid"
+            return "invalid (existing)"
 
-        if seq == 1 and prev_hash != GENESIS_ID:
-            return "invalid"
-        elif seq != 1 and prev_hash == GENESIS_ID:
-            return "invalid"
+        if seq == 0 and prev_hash != GENESIS_ID:
+            return "invalid (prev is not Genesis)"
+        elif seq != 0 and prev_hash == GENESIS_ID:
+            return "invalid (prev is Genesis)"
 
         prev_blk = (self.get_blocks_until(public_key, seq - 1, limit=1) or [None])[0]
         next_blk = (self.get_blocks_since(public_key, seq + 1, limit=1) or [None])[0]
         result = "valid"
         if not prev_blk and not next_blk:
-            # No blocks found, there is no info to base on
-            result = "no-info"
+            if seq != 0:
+                # No blocks found, there is no info to base on
+                result = "no-info"
+            else:
+                # If it is a starting block, we can at least conclude that the start is right if the totals add up
+                result = "partial-next"
         elif not next_blk:
             # The next block does not exist in the database, at best our result can now be partial w.r.t. next
             result = "partial-next"
@@ -350,7 +354,7 @@ class MultiChainDB(Database):
                 prev_blk.public_key_responder == public_key and prev_blk.sequence_number_responder != seq - 1:
                 # If both sides are unknown or non-contiguous return a full partial result.
                 result = "partial"
-        elif not prev_blk and seq != 1:
+        elif not prev_blk and seq != 0:
             # The previous block does not exist in the database, at best our result can now be partial w.r.t. prev
             result = "partial-prev"
             if next_blk.public_key_requester == public_key and next_blk.sequence_number_requester != seq + 1 or \
@@ -365,14 +369,17 @@ class MultiChainDB(Database):
              or (prev_blk.public_key_responder == public_key and (prev_blk.total_up_responder + up > t_up or
                         prev_blk.total_down_responder + down > t_down or
                         (prev_blk.sequence_number_responder == seq - 1 and prev_blk.hash_responder != prev_hash)))):
-            result = "invalid"
+            result = "invalid (prev)"
 
         if next_blk and (
                 (next_blk.public_key_requester == public_key and (t_up + next_blk.up > next_blk.total_up_requester or
                         t_down + next_blk.down > next_blk.total_down_requester))
              or (next_blk.public_key_responder == public_key and (t_up + next_blk.down > next_blk.total_up_responder or
                         t_down + next_blk.up > next_blk.total_down_responder))):
-            result = "invalid"
+            result = "invalid (next)"
+
+        if not next_blk and not prev_blk and seq == 0 and (t_up != up or t_down != down):
+            result = "invalid (genesis totals)"
 
         return result
 

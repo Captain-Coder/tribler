@@ -242,7 +242,6 @@ class MultiChainCommunity(Community):
             self.logger.info("Signature response received. Modified: %s" % modified)
             validation_result = self.persistence.validate(response.authentication.members[1].public_key, response.payload.sequence_number_requester, response.payload.down, response.payload.up, response.payload.total_up_requester, response.payload.total_down_requester, response.payload.previous_hash_requester)
             self.logger.info("Signature response validation result: %s" % validation_result)
-
             return request.payload.sequence_number_requester == response.payload.sequence_number_requester and \
                request.payload.previous_hash_requester == response.payload.previous_hash_requester and modified
 
@@ -336,6 +335,9 @@ class MultiChainCommunity(Community):
             block = DatabaseBlock.from_block_response_message(message, requester, responder)
             # Create the hash of the message
             if not self.persistence.contains(block.hash_requester):
+                validation_req = self.persistence.validate(requester.public_key, block.sequence_number_requester, block.up, block.down, block.total_up_requester, block.total_down_requester, block.previous_hash_requester)
+                validation_res = self.persistence.validate(responder.public_key, block.sequence_number_responder, block.down, block.up, block.total_up_responder, block.total_down_responder, block.previous_hash_responder)
+                self.logger.info("Crawler: Block validation result, req %s, res %s" % (validation_req, validation_res))
                 self.logger.info("Crawler: Persisting id: %s" % base64.encodestring(block.hash_requester).strip())
                 self.persistence.add_block(block)
             else:
