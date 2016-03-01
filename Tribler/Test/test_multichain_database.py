@@ -330,8 +330,8 @@ class TestDatabase(MultiChainTestCase):
         # Act
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "valid")
-        self.assertEqual(b, "valid")
+        self.assertEqual(a, ('valid', []))
+        self.assertEqual(b, ('valid', []))
 
     def test_validate(self):
         # Arrange
@@ -343,8 +343,8 @@ class TestDatabase(MultiChainTestCase):
         # Act
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "valid")
-        self.assertEqual(b, "valid")
+        self.assertEqual(a, ('valid', []))
+        self.assertEqual(b, ('valid', []))
 
     def test_validate_no_info(self):
         # Arrange
@@ -355,8 +355,8 @@ class TestDatabase(MultiChainTestCase):
         # Act
         (a, b) = self.validate_block(db, block4)
         # Assert
-        self.assertEqual(a, "no-info")
-        self.assertEqual(b, "no-info")
+        self.assertEqual(a, ('no-info', ['No blocks are know for this member before or after the queried sequence number']))
+        self.assertEqual(b, ('no-info', ['No blocks are know for this member before or after the queried sequence number']))
 
     def test_validate_partial_prev(self):
         # Arrange
@@ -368,8 +368,8 @@ class TestDatabase(MultiChainTestCase):
         # Act
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "partial-prev")
-        self.assertEqual(b, "partial-prev")
+        self.assertEqual(a, ('partial-prev', []))
+        self.assertEqual(b, ('partial-prev', []))
 
     def test_validate_partial_next(self):
         # Arrange
@@ -381,8 +381,8 @@ class TestDatabase(MultiChainTestCase):
         # Act
         (a, b) = self.validate_block(db, block3)
         # Assert
-        self.assertEqual(a, "partial-next")
-        self.assertEqual(b, "partial-next")
+        self.assertEqual(a, ('partial-next', []))
+        self.assertEqual(b, ('partial-next', []))
 
     def test_validate_partial(self):
         # Arrange
@@ -394,8 +394,8 @@ class TestDatabase(MultiChainTestCase):
         # Act
         (a, b) = self.validate_block(db, block3)
         # Assert
-        self.assertEqual(a, "partial")
-        self.assertEqual(b, "partial")
+        self.assertEqual(a, ('partial', []))
+        self.assertEqual(b, ('partial', []))
 
     def test_invalid_existing_up(self):
         # Arrange
@@ -409,8 +409,8 @@ class TestDatabase(MultiChainTestCase):
         block2.up += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Up does not match known block', 'Total up is lower than expected compared to the preceding block']))
+        self.assertEqual(b, ('invalid', ['Up does not match known block', 'Total down is lower than expected compared to the preceding block']))
 
     def test_invalid_existing_down(self):
         # Arrange
@@ -424,8 +424,8 @@ class TestDatabase(MultiChainTestCase):
         block2.down += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Down does not match known block', 'Total down is lower than expected compared to the preceding block']))
+        self.assertEqual(b, ('invalid', ['Down does not match known block', 'Total up is lower than expected compared to the preceding block']))
 
     def test_invalid_existing_tup(self):
         # Arrange
@@ -440,8 +440,8 @@ class TestDatabase(MultiChainTestCase):
         block2.total_up_responder += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Total up does not match known block', 'Total up is higher than expected compared to the next block']))
+        self.assertEqual(b, ('invalid', ['Total up does not match known block', 'Total up is higher than expected compared to the next block']))
 
     def test_invalid_existing_tdown(self):
         # Arrange
@@ -456,8 +456,8 @@ class TestDatabase(MultiChainTestCase):
         block2.total_down_responder += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Total down does not match known block', 'Total down is higher than expected compared to the next block']))
+        self.assertEqual(b, ('invalid', ['Total down does not match known block', 'Total down is higher than expected compared to the next block']))
 
     def test_invalid_existing_hash(self):
         # Arrange
@@ -472,8 +472,8 @@ class TestDatabase(MultiChainTestCase):
         block2.previous_hash_responder = sha1(str(random.randint(0, 100000))).digest()
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Previous hash does not match known block', 'Previous hash is not equal to the id of the previous block']))
+        self.assertEqual(b, ('invalid', ['Previous hash does not match known block', 'Previous hash is not equal to the id of the previous block']))
 
     def test_invalid_seq_not_genesis(self):
         # Arrange
@@ -485,8 +485,8 @@ class TestDatabase(MultiChainTestCase):
         block1.previous_hash_responder = sha1(str(random.randint(0, 100000))).digest()
         (a, b) = self.validate_block(db, block1)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Sequence number implies previous hash should be Genesis ID']))
+        self.assertEqual(b, ('invalid', ['Sequence number implies previous hash should be Genesis ID']))
 
     def test_invalid_seq_genesis(self):
         # Arrange
@@ -500,8 +500,21 @@ class TestDatabase(MultiChainTestCase):
         block2.previous_hash_responder = GENESIS_ID
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Sequence number implies previous hash should not be Genesis ID', 'Genesis block invalid total_up and/or up', 'Genesis block invalid total_down and/or down', 'Previous hash is not equal to the id of the previous block']))
+        self.assertEqual(b, ('invalid', ['Sequence number implies previous hash should not be Genesis ID', 'Genesis block invalid total_up and/or up', 'Genesis block invalid total_down and/or down', 'Previous hash is not equal to the id of the previous block']))
+
+    def test_invalid_genesis(self):
+        # Arrange
+        dispersy = self.MockDispersy()
+        db = MultiChainDB(dispersy, self.getStateDir())
+        (block1, _, _, _) = self.setup_validate(db, dispersy)
+        # Act
+        block1.up += 10
+        block1.down += 10
+        (a, b) = self.validate_block(db, block1)
+        # Assert
+        self.assertEqual(a, ('invalid', ['Genesis block invalid total_up and/or up', 'Genesis block invalid total_down and/or down']))
+        self.assertEqual(b, ('invalid', ['Genesis block invalid total_up and/or up', 'Genesis block invalid total_down and/or down']))
 
     def test_invalid_up(self):
         # Arrange
@@ -514,8 +527,8 @@ class TestDatabase(MultiChainTestCase):
         block2.up += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Total up is lower than expected compared to the preceding block']))
+        self.assertEqual(b, ('invalid', ['Total down is lower than expected compared to the preceding block']))
 
     def test_invalid_down(self):
         # Arrange
@@ -528,8 +541,8 @@ class TestDatabase(MultiChainTestCase):
         block2.down += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Total down is lower than expected compared to the preceding block']))
+        self.assertEqual(b, ('invalid', ['Total up is lower than expected compared to the preceding block']))
 
     def test_invalid_tup(self):
         # Arrange
@@ -543,8 +556,8 @@ class TestDatabase(MultiChainTestCase):
         block2.total_up_responder += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Total up is higher than expected compared to the next block']))
+        self.assertEqual(b, ('invalid', ['Total up is higher than expected compared to the next block']))
 
     def test_invalid_tdown(self):
         # Arrange
@@ -558,8 +571,8 @@ class TestDatabase(MultiChainTestCase):
         block2.total_down_responder += 10
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Total down is higher than expected compared to the next block']))
+        self.assertEqual(b, ('invalid', ['Total down is higher than expected compared to the next block']))
 
     def test_invalid_hash(self):
         # Arrange
@@ -573,8 +586,8 @@ class TestDatabase(MultiChainTestCase):
         block2.previous_hash_responder = sha1(str(random.randint(0, 100000))).digest()
         (a, b) = self.validate_block(db, block2)
         # Assert
-        self.assertEqual(a, "invalid")
-        self.assertEqual(b, "invalid")
+        self.assertEqual(a, ('invalid', ['Previous hash is not equal to the id of the previous block']))
+        self.assertEqual(b, ('invalid', ['Previous hash is not equal to the id of the previous block']))
 
 if __name__ == '__main__':
     unittest.main()

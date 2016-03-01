@@ -202,7 +202,7 @@ class MultiChainCommunity(Community):
         # TODO: Like basic total_up == previous_total_up + block.up or more sophisticated chain checks.
         payload = message.payload
         validation_result = self.persistence.validate(message.authentication.member.public_key, payload.sequence_number_requester, payload.up, payload.down, payload.total_up_requester, payload.total_down_requester, payload.previous_hash_requester)
-        self.logger.info("Signature request validation result: %s" % validation_result)
+        self.logger.info("Signature request validation result: (%s, %s)" % validation_result)
 
         """ The up and down values are reversed for the responder. """
         total_up_responder, total_down_responder = self._get_next_total(payload.down, payload.up)
@@ -241,7 +241,7 @@ class MultiChainCommunity(Community):
             # TODO: Check whether we are expecting a response
             self.logger.info("Signature response received. Modified: %s" % modified)
             validation_result = self.persistence.validate(response.authentication.members[1].public_key, response.payload.sequence_number_requester, response.payload.down, response.payload.up, response.payload.total_up_requester, response.payload.total_down_requester, response.payload.previous_hash_requester)
-            self.logger.info("Signature response validation result: %s" % validation_result)
+            self.logger.info("Signature response validation result: (%s, %s)" % validation_result)
             return request.payload.sequence_number_requester == response.payload.sequence_number_requester and \
                request.payload.previous_hash_requester == response.payload.previous_hash_requester and modified
 

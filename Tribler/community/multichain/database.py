@@ -5,10 +5,7 @@ from hashlib import sha256
 
 from Tribler.dispersy.database import Database
 from Tribler.community.multichain.conversion import encode_block, encode_block_requester_half, encode_block_crawl,\
-    EMPTY_HASH
-
-# ID of the first block of the chain.
-GENESIS_ID = '0' * 20
+    EMPTY_HASH, GENESIS_ID
 
 DATABASE_DIRECTORY = path.join(u"sqlite")
 """ Path to the database location + dispersy._workingdirectory"""
@@ -313,75 +310,125 @@ class MultiChainDB(Database):
                  "invalid" if the values violate any of the rules,
                  "no-data" if there is not enough information known about the member to validate
         """
+
+        # YUCK! The inner err() function cannot modify a variable in the outer scope. So we have to use a mutable object
+        result = ["valid"]
+        errors = []
+
+        def err(reason):
+            result[0] = "invalid"
+            errors.append(reason)
+
         blk = self.get_by_public_key_and_sequence_number(public_key, seq)
-        if blk and (blk.public_key_requester == blk.public_key_responder or
-                blk.public_key_requester == public_key and (
-                                blk.up != up or blk.down != down or
-                                blk.sequence_number_requester != seq or
-                                blk.total_up_requester != t_up or
-                                blk.total_down_requester != t_down or
-                                blk.previous_hash_requester != prev_hash
-                            ) or
-                blk.public_key_responder == public_key and (
-                                blk.up != down or blk.down != up or
-                                blk.sequence_number_responder != seq or
-                                blk.total_up_responder != t_up or
-                                blk.total_down_responder != t_down or
-                                blk.previous_hash_responder != prev_hash
-                            )):
-            # the block exists in the database but the values do not agree
-            return "invalid (existing)"
-
-        if seq == 0 and prev_hash != GENESIS_ID:
-            return "invalid (prev is not Genesis)"
-        elif seq != 0 and prev_hash == GENESIS_ID:
-            return "invalid (prev is Genesis)"
-
         prev_blk = (self.get_blocks_until(public_key, seq - 1, limit=1) or [None])[0]
         next_blk = (self.get_blocks_since(public_key, seq + 1, limit=1) or [None])[0]
-        result = "valid"
+
+        if blk:
+            if blk.public_key_requester == blk.public_key_responder:
+                err("Self signed known block")
+            if blk.public_key_requester == public_key:
+                if blk.up != up:
+                    err("Up does not match known block")
+                if blk.down != down:
+                    err("Down does not match known block")
+                if blk.total_up_requester != t_up:
+                    err("Total up does not match known block")
+                if blk.total_down_requester != t_down:
+                    err("Total down does not match known block")
+                if blk.previous_hash_requester != prev_hash:
+                    err("Previous hash does not match known block")
+            if blk.public_key_responder == public_key:
+                if blk.up != down:
+                    err("Up does not match known block")
+                if blk.down != up:
+                    err("Down does not match known block")
+                if blk.total_up_responder != t_up:
+                    err("Total up does not match known block")
+                if blk.total_down_responder != t_down:
+                    err("Total down does not match known block")
+                if blk.previous_hash_responder != prev_hash:
+                    err("Previous hash does not match known block")
+
         if not prev_blk and not next_blk:
             if seq != 0:
                 # No blocks found, there is no info to base on
-                result = "no-info"
+                err("No blocks are know for this member before or after the queried sequence number")
+                result[0] = "no-info"
             else:
                 # If it is a starting block, we can at least conclude that the start is right if the totals add up
-                result = "partial-next"
-        elif not next_blk:
+                result[0] = "partial-next"
+        elif not prev_blk and next_blk:
+            # The previous block does not exist in the database, at best our result can now be partial w.r.t. prev
+            if seq != 0:
+                # We are not checking the first block after genesis, so we are really missing the previous block
+                result[0] = "partial-prev"
+                if next_blk.public_key_requester == public_key and next_blk.sequence_number_requester != seq + 1 or \
+                    next_blk.public_key_responder == public_key and next_blk.sequence_number_responder != seq + 1:
+                    # If both sides are unknown or non-contiguous return a full partial result.
+                    result[0] = "partial"
+        elif prev_blk and not next_blk:
             # The next block does not exist in the database, at best our result can now be partial w.r.t. next
-            result = "partial-next"
+            result[0] = "partial-next"
             if prev_blk.public_key_requester == public_key and prev_blk.sequence_number_requester != seq - 1 or \
                 prev_blk.public_key_responder == public_key and prev_blk.sequence_number_responder != seq - 1:
                 # If both sides are unknown or non-contiguous return a full partial result.
-                result = "partial"
-        elif not prev_blk and seq != 0:
-            # The previous block does not exist in the database, at best our result can now be partial w.r.t. prev
-            result = "partial-prev"
-            if next_blk.public_key_requester == public_key and next_blk.sequence_number_requester != seq + 1 or \
-                next_blk.public_key_responder == public_key and next_blk.sequence_number_responder != seq + 1:
-                # If both sides are unknown or non-contiguous return a full partial result.
-                result = "partial"
+                result[0] = "partial"
+        else:
+            # both sides have knowns, see if there are gaps
+            # TODO: refactor to be less repetitive...
+            if (prev_blk.public_key_requester == public_key and prev_blk.sequence_number_requester != seq - 1 or \
+                prev_blk.public_key_responder == public_key and prev_blk.sequence_number_responder != seq - 1) and \
+               (next_blk.public_key_requester == public_key and next_blk.sequence_number_requester != seq + 1 or \
+                next_blk.public_key_responder == public_key and next_blk.sequence_number_responder != seq + 1):
+                result[0] = "partial"
+            elif (prev_blk.public_key_requester == public_key and prev_blk.sequence_number_requester != seq - 1 or \
+                prev_blk.public_key_responder == public_key and prev_blk.sequence_number_responder != seq - 1):
+                result[0] = "partial-prev"
+            elif (next_blk.public_key_requester == public_key and next_blk.sequence_number_requester != seq + 1 or \
+                next_blk.public_key_responder == public_key and next_blk.sequence_number_responder != seq + 1):
+                result[0] = "partial-next"
 
-        if prev_blk and (
-                (prev_blk.public_key_requester == public_key and (prev_blk.total_up_requester + up > t_up or
-                        prev_blk.total_down_requester + down > t_down or
-                        (prev_blk.sequence_number_requester == seq - 1 and prev_blk.hash_requester != prev_hash)))
-             or (prev_blk.public_key_responder == public_key and (prev_blk.total_up_responder + up > t_up or
-                        prev_blk.total_down_responder + down > t_down or
-                        (prev_blk.sequence_number_responder == seq - 1 and prev_blk.hash_responder != prev_hash)))):
-            result = "invalid (prev)"
+        if seq == 0 and prev_hash != GENESIS_ID:
+            err("Sequence number implies previous hash should be Genesis ID")
+        if seq != 0 and prev_hash == GENESIS_ID:
+            err("Sequence number implies previous hash should not be Genesis ID")
 
-        if next_blk and (
-                (next_blk.public_key_requester == public_key and (t_up + next_blk.up > next_blk.total_up_requester or
-                        t_down + next_blk.down > next_blk.total_down_requester))
-             or (next_blk.public_key_responder == public_key and (t_up + next_blk.down > next_blk.total_up_responder or
-                        t_down + next_blk.up > next_blk.total_down_responder))):
-            result = "invalid (next)"
+        if seq == 0 or prev_hash == GENESIS_ID:
+            if t_up != up:
+                err("Genesis block invalid total_up and/or up")
+            if t_down != down:
+                err("Genesis block invalid total_down and/or down")
 
-        if not next_blk and not prev_blk and seq == 0 and (t_up != up or t_down != down):
-            result = "invalid (genesis totals)"
+        if prev_blk:
+            if prev_blk.public_key_requester == public_key:
+                if prev_blk.total_up_requester + up > t_up:
+                    err("Total up is lower than expected compared to the preceding block")
+                if prev_blk.total_down_requester + down > t_down:
+                    err("Total down is lower than expected compared to the preceding block")
+                if prev_blk.sequence_number_requester == seq - 1 and prev_blk.hash_requester != prev_hash:
+                    err("Previous hash is not equal to the id of the previous block")
+            elif prev_blk.public_key_responder == public_key:
+                if prev_blk.total_up_responder + up > t_up:
+                    err("Total up is lower than expected compared to the preceding block")
+                if prev_blk.total_down_responder + down > t_down:
+                    err("Total down is lower than expected compared to the preceding block")
+                if prev_blk.sequence_number_responder == seq - 1 and prev_blk.hash_responder != prev_hash:
+                    err("Previous hash is not equal to the id of the previous block")
 
-        return result
+        if next_blk:
+            if next_blk.public_key_requester == public_key:
+                if t_up + next_blk.up > next_blk.total_up_requester:
+                    err("Total up is higher than expected compared to the next block")
+                if t_down + next_blk.down > next_blk.total_down_requester:
+                    err("Total down is higher than expected compared to the next block")
+            elif next_blk.public_key_responder == public_key:
+                if t_up + next_blk.down > next_blk.total_up_responder:
+                    err("Total up is higher than expected compared to the next block")
+                if t_down + next_blk.up > next_blk.total_down_responder:
+                    err("Total down is higher than expected compared to the next block")
+            #TODO: verify hash id of next_blk, but how to calculate based on a half block?
+
+        return (result[0], errors)
 
     def open(self, initial_statements=True, prepare_visioning=True):
         return super(MultiChainDB, self).open(initial_statements, prepare_visioning)
