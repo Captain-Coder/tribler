@@ -38,12 +38,12 @@ class TriblerStatusBar(QStatusBar):
 
     def load_multichain_stats(self):
         self.request_mgr = TriblerRequestManager()
-        self.request_mgr.perform_request("multichain/stats", self.on_received_multichain_stats)
+        self.request_mgr.perform_request("multichain/statistics", self.on_received_multichain_stats)
 
     def on_received_multichain_stats(self, multichain):
-        if multichain and 'stats' in multichain:
-            self.set_multichain_stats(multichain['stats']['self_total_down_mb']*1024*1024,
-                                      multichain['stats']['self_total_up_mb']*1024*1024)
+        if multichain and 'statistics' in multichain:
+            self.set_multichain_stats(multichain['statistics']['self_total_down_mb']*1024*1024,
+                                      multichain['statistics']['self_total_up_mb']*1024*1024)
 
     def set_speeds(self, download, upload):
         self.speed_label.setText("↓ %s  ↑ %s" % (format_speed(download), format_speed(upload)))
