@@ -16,7 +16,7 @@ from Tribler.Core.Utilities.encoding import encode, decode
 from Tribler.Core.simpledefs import DLSTATUS_SEEDING, DLSTATUS_STOPPED, \
     NTFY_TUNNEL, NTFY_IP_REMOVED, NTFY_RP_REMOVED, NTFY_IP_RECREATE, \
     NTFY_DHT_LOOKUP, NTFY_KEY_REQUEST, NTFY_KEY_RESPOND, NTFY_KEY_RESPONSE, \
-    NTFY_CREATE_E2E, NTFY_ONCREATED_E2E, NTFY_IP_CREATED, NTFY_RP_CREATED, DLSTATUS_DOWNLOADING
+    NTFY_CREATE_E2E, NTFY_ONCREATED_E2E, NTFY_IP_CREATED, NTFY_RP_CREATED, DLSTATUS_DOWNLOADING, DLSTATUS_METADATA
 
 from Tribler.community.tunnel import CIRCUIT_TYPE_IP, CIRCUIT_TYPE_RP, CIRCUIT_TYPE_RENDEZVOUS, \
     EXIT_NODE, EXIT_NODE_SALT, CIRCUIT_ID_PORT
@@ -89,10 +89,11 @@ class KeyRequestCache(RandomNumberCache):
 
 class DHTRequestCache(RandomNumberCache):
 
-    def __init__(self, community, circuit, info_hash):
+    def __init__(self, community, circuit, info_hash, is_real=False):
         super(DHTRequestCache, self).__init__(community.request_cache, u"dht-request")
         self.circuit = circuit
         self.info_hash = info_hash
+        self.is_real = is_real
 
     def on_timeout(self):
         pass
@@ -238,6 +239,7 @@ class HiddenTunnelCommunity(TunnelCommunity):
         # Monitor downloads with anonymous flag set, and build rendezvous/introduction points when needed.
         new_states = {}
         hops = {}
+        real_hashes = {}
 
         for ds in dslist:
             download = ds.get_download()
@@ -245,6 +247,7 @@ class HiddenTunnelCommunity(TunnelCommunity):
                 # Convert the real infohash to the infohash used for looking up introduction points
                 real_info_hash = download.get_def().get_infohash()
                 info_hash = self.get_lookup_info_hash(real_info_hash)
+                real_hashes[info_hash] = real_info_hash
                 hops[info_hash] = download.get_hops()
                 new_states[info_hash] = ds.get_status()
 
@@ -272,9 +275,10 @@ class HiddenTunnelCommunity(TunnelCommunity):
             time_elapsed = (time.time() - self.last_dht_lookup.get(info_hash, 0))
             force_dht_lookup = time_elapsed >= self.settings.dht_lookup_interval
             if (state_changed or force_dht_lookup) and \
-               (new_state == DLSTATUS_SEEDING or new_state == DLSTATUS_DOWNLOADING):
+               (new_state == DLSTATUS_SEEDING or new_state == DLSTATUS_DOWNLOADING or new_state == DLSTATUS_METADATA):
                 self.tunnel_logger.info('Do dht lookup to find hidden services peers for %s' % info_hash.encode('hex'))
-                self.do_dht_lookup(info_hash)
+                self.do_dht_lookup(info_hash, real_hashes[info_hash])
+                # self.do_dht_lookup(info_hash)
 
             if state_changed and new_state == DLSTATUS_SEEDING:
                 self.create_introduction_point(info_hash)
@@ -297,7 +301,7 @@ class HiddenTunnelCommunity(TunnelCommunity):
 
         self.download_states = new_states
 
-    def do_dht_lookup(self, info_hash):
+    def do_dht_lookup(self, info_hash, real_info_hash):
         # Select a circuit from the pool of exit circuits
         self.tunnel_logger.info("Do DHT request: select circuit")
         circuit = self.selection_strategy.select(None, self.hops[info_hash])
@@ -312,6 +316,11 @@ class HiddenTunnelCommunity(TunnelCommunity):
         self.send_cell([Candidate(circuit.first_hop, False)],
                        u"dht-request",
                        (circuit.circuit_id, cache.number, info_hash))
+        circuit = self.selection_strategy.select(None, self.hops[info_hash])
+        cache = self.request_cache.add(DHTRequestCache(self, circuit, real_info_hash, is_real=True))
+        self.send_cell([Candidate(circuit.first_hop, False)],
+                       u"dht-request",
+                       (circuit.circuit_id, cache.number, real_info_hash))
 
     def on_dht_request(self, messages):
         for message in messages:
@@ -350,7 +359,7 @@ class HiddenTunnelCommunity(TunnelCommunity):
 
     def on_dht_response(self, messages):
         for message in messages:
-            self.request_cache.get(u"dht-request", message.payload.identifier)
+            cache = self.request_cache.get(u"dht-request", message.payload.identifier)
 
             info_hash = message.payload.info_hash
             _, peers = decode(message.payload.peers)
@@ -366,13 +375,22 @@ class HiddenTunnelCommunity(TunnelCommunity):
             for i in xrange(len(blacklist) - 1, -1, -1):
                 if time.time() - blacklist[i][0] > 60:
                     blacklist.pop(i)
-            exclude = [rp[2] for rp in self.my_download_points.values()] + [sock_addr for _, sock_addr in blacklist]
-            for peer in peers:
-                if peer not in exclude:
-                    self.tunnel_logger.info("Requesting key from dht peer %s", peer)
-                    # Blacklist this sock_addr for a period of at least 60s
-                    self.dht_blacklist[info_hash].append((time.time(), peer))
-                    self.create_key_request(info_hash, peer)
+            if not cache.is_real:
+                exclude = [rp[2] for rp in self.my_download_points.values()] + [sock_addr for _, sock_addr in blacklist]
+                for peer in peers:
+                    if peer not in exclude:
+                        self.tunnel_logger.info("Requesting key from dht peer %s", peer)
+                        # Blacklist this sock_addr for a period of at least 60s
+                        self.dht_blacklist[info_hash].append((time.time(), peer))
+                        self.create_key_request(info_hash, peer)
+            else:
+                download = self.trsession.get_download(info_hash)
+                if download:
+                    for peer in peers:
+                        self._logger.info("Added real info hash peer looked up in dht (%s)" % repr(peer))
+                        download.add_peer(peer)
+                else:
+                    self._logger.info("Download has vanished")
 
     def create_key_request(self, info_hash, sock_addr):
         # 1. Select a circuit
