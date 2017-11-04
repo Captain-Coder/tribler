@@ -41,6 +41,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         self.bandwidth_wallet = kwargs.pop('bandwidth_wallet', None)
         socks_listen_ports = kwargs.pop('socks_listen_ports', None)
         self.annon_seeding_enabled = kwargs.pop('annon_seeding_enabled', True)
+        self.netflow_scoring_enabled = kwargs.pop('netflow_scoring_enabled', False)
         state_path = self.tribler_session.config.get_state_dir() if self.tribler_session else ''
         self.exitnode_cache = kwargs.pop('exitnode_cache', os.path.join(state_path, 'exitnode_cache.dat'))
         super(TriblerTunnelCommunity, self).__init__(*args, **kwargs)
