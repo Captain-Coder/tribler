@@ -1,3 +1,7 @@
+from subprocess import Popen, PIPE
+from random import random
+from time import time
+
 from twisted.internet import reactor
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet.task import LoopingCall
@@ -37,6 +41,7 @@ class TriblerChainCommunity(TrustChainCommunity):
     DB_CLASS = TriblerChainDB
     DB_NAME = "triblerchain"
     SIGN_DELAY = 5
+    SCORE_REFRESH_INTERVAL = 30 * 60  # update every half hour
 
     def __init__(self, *args, **kwargs):
         super(TriblerChainCommunity, self).__init__(*args, **kwargs)
@@ -46,6 +51,11 @@ class TriblerChainCommunity(TrustChainCommunity):
         # The key is the public key of the peer being interacted with, the value a tuple of the up and down bytes
         # This data is not used to create outgoing requests, but _only_ to verify incoming requests
         self.pending_bytes = dict()
+
+        # We store the score for each PK that we know of here
+        # TODO: clean up the obvious memory leak
+        self.scores = dict()
+        self.scores_last_update = dict()
 
         # Store invalid messages since one of these might contain a block that is bought on the market
         self.pending_sign_messages = {}
@@ -121,6 +131,148 @@ class TriblerChainCommunity(TrustChainCommunity):
             self.pending_sign_messages[block_id] = message
             return False
         return True
+
+    @blocking_call_on_reactor_thread
+    def _update_scores(self, node_pks):
+        me = self.my_member.public_key
+        update_pks = [pk for pk in node_pks if pk != me and (
+            pk not in self.scores_last_update or self.scores_last_update[pk] + SCORE_REFRESH_INTERVAL < time())]
+        if len(update_pks) == 0:
+            return
+
+        # perform pimrank/netflow here to score candidates
+        graph = self.persistence.get_subjective_work_graph()
+        keys = []
+        for k in graph.iterkeys():
+            if k[0] not in keys:
+                keys.append(k[0])
+            if k[1] not in keys:
+                keys.append(k[1])
+
+        variables = dict()
+        bound = dict()
+        constraints = [0]
+
+        def define_variable(name):
+            if name not in variables:
+                variables[name] = "x%s" % len(variables)
+                bound[name] = None
+            return variables[name]
+
+        solver = Popen(["/usr/bin/glpsol", "--lp", "/proc/self/fd/0", "-w", "/proc/self/fd/2"], stdin=PIPE, stderr=PIPE)
+
+        def define_constraint(plus, minus=None, value=0, constraint_type='eq'):
+            if constraint_type == "ub" and plus is not None and len(plus) == 1 and minus is None:
+                define_variable(plus[0])
+                bound[plus[0]] = value if bound[plus[0]] is None else min(value, bound[plus[0]])
+                return
+            parts = []
+            if plus:
+                parts.append(" + ".join([define_variable(name) for name in plus]))
+            if minus:
+                parts.append(" - ".join([define_variable(name) for name in minus]))
+            solver.stdin.write("c%s: %s %s %s\n" % (constraints[0], " - ".join(parts),
+                                                    "=" if constraint_type == 'eq' else "<=", value))
+            constraints[0] += 1
+
+        def max_flow(g, source, sink, prefix, cap_prefix = None):
+            prefix = "%s_%s" % (prefix, source.encode("hex"))
+            for k in g.iterkeys():
+                define_constraint(["%s__%s_%s" % (prefix, k[0].encode("hex"), k[1].encode("hex"))],
+                                  value=g[k][0], constraint_type='ub')
+            for pk in keys:
+                plus = []
+                minus = []
+                for k in g.iterkeys():
+                    if k[0] == pk:
+                        plus.append("%s__%s_%s" % (prefix, k[0].encode("hex"), k[1].encode("hex")))
+                    if k[1] == pk:
+                        minus.append("%s__%s_%s" % (prefix, k[0].encode("hex"), k[1].encode("hex")))
+                if pk == source:
+                    # nothing should flow into the source, sum(minus) = 0
+                    define_constraint(plus=minus)
+                elif pk == sink:
+                    # nothing should flow out of the sink, sum(plus) = 0
+                    define_constraint(plus)
+                    # define sum(minus) - prefix = 0. It defines variable prefix as the "result" of this maxflow.
+                    define_constraint(plus=minus, minus=[prefix])
+                else:
+                    # in any other node, the flow out (plus) and in (minus) should be balanced
+                    define_constraint(plus, minus)
+                    node_cap = "%s_%s" % (cap_prefix, pk.encode("hex"))
+                    if node_cap in variables:
+                        # if we have a variable for this node's capacity, apply it as max to the flow coming in.
+                        # this is where the magic happens, since it is a bound and not an equality, the optimizer might
+                        # need to to only a few steps in the P1 max flow LP problem to verify this P2 flow is indeed
+                        # possible.
+                        define_constraint(plus=minus, minus=[node_cap], constraint_type='ub')
+
+        if len(update_pks) == 0:
+            self.logger.error("Unable to compute NetFlow LP model nothing to compute")
+            return
+
+        objective = [define_variable("P2_%s" % peer.encode("hex")) for peer in update_pks]
+        solver.stdin.write("Maximize\n")
+        solver.stdin.write(" + ".join(objective))
+        solver.stdin.write("\nSubject To\n")
+
+        for peer in keys:
+            if peer != me:
+                max_flow(graph, peer, me, "P1")
+
+        for peer in update_pks:
+            max_flow(graph, peer, me, "P2", "P1")
+
+        solver.stdin.write("Bounds\n")
+        for key, val in bound.iteritems():
+            if val is not None:
+                solver.stdin.write("%s <= %s\n" % (variables[key], val))
+
+        solver.stdin.write("End\n")
+        solver.stdin.flush()
+        solver.stdin.close()
+
+        for peer in update_pks:
+            self.scores_last_update[peer] = time()
+
+        for line in solver.stderr:
+            fields = line.split(" ")
+            if len(fields) < 5 or fields[0] != "j":
+                continue
+            index = int(fields[1]) - 1
+            if index >= len(update_pks):
+                continue
+            self.scores[update_pks[index]] = int(fields[3])
+
+        solver.wait()
+
+        if solver.returncode != 0:
+            self.logger.error("Unable to compute NetFlow LP model (solver exit code %s)" % solver.returncode)
+
+    def score_candidates(self, candidates):
+        # compute scores
+        # loop:
+        #   yield one based on score probability, unknowns get a 0 probability
+        #   remove yielded candidate?
+        epsilon = 0.000001
+
+        # we don't want to modify the list the caller put in, so copy construct
+        candidates = list(candidates)
+
+        pks = [c if isinstance(c, basestring) else c.get_member().public_key for c in candidates]
+        self._update_scores(pks)
+        pkscores = [self.scores[pk] if pk in self.scores else epsilon * 4 for pk in pks]
+        totalscore = sum(pkscores) + epsilon
+        while candidates:
+            rand = random()
+            for index in range(0, len(candidates)):
+                rand -= pkscores[index]/totalscore
+                if rand <= epsilon:
+                    yield candidates[index]
+                    del candidates[index]
+                    del pkscores[index]
+                    totalscore = sum(pkscores) + epsilon
+                    break
 
     @blocking_call_on_reactor_thread
     def get_statistics(self, public_key=None):

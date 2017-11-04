@@ -1,3 +1,5 @@
+from random import choice, randint
+
 from twisted.internet import reactor
 from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.internet.task import deferLater
@@ -448,3 +450,122 @@ class TestTriblerChainCommunity(BaseTestTrustChainCommunity):
         self.assertEqual(node_bootstrap['transaction']['down'], 0)
         self.assertEqual(node_bootstrap['block']['sequence_number'], 1)
         self.assertNotEqual(node_bootstrap['block']['block_hash'], "")
+
+    def test_score_candidates(self):
+        """
+        Test that the netflow of each node is correct
+        """
+        # Arrange
+        node, other, another = self.create_nodes(3)
+        node_other = self._create_target(node, other)
+        node_another = self._create_target(node, another)
+        other_another = self._create_target(other, another)
+        TestTriblerChainCommunity.set_expectation(other, node, 50, 50)
+        TestTriblerChainCommunity.set_expectation(another, node, 50, 50)
+        TestTriblerChainCommunity.set_expectation(another, other, 50, 50)
+        transaction = [4, 10]
+        TestTriblerChainCommunity.create_block(node, other, node_other, transaction)
+        TestTriblerChainCommunity.create_block(node, another, node_another, transaction)
+        TestTriblerChainCommunity.create_block(other, another, other_another, transaction)
+
+        # make sure we have full knowledge of our graph
+        TestTriblerChainCommunity.crawl_node(other, another, other_another, 0)
+        TestTriblerChainCommunity.crawl_node(node, other, node_other, 0)
+        TestTriblerChainCommunity.crawl_node(node, another, node_another, 0)
+
+        # +----------+ 5 [u 4, d 10]
+        # |   Node   |----------+
+        # +----------+          | 6 [u 10, d 4]
+        #   | 3 [u 4, d 10]   +-------------+
+        #   |                 |   Another   |
+        #   | 4 [u 10, d 4]   +-------------+
+        # +----------+          | 2 [u 10, d 4]
+        # |   Other  |----------+
+        # +----------+ 1 [u 4, d 10]
+        #
+        # In the situation we have created here, node has a total of [4u, 10d] with other and another. Other also has
+        # [4u, 10d] with another. Thus another has 2 paths towards node to maximize it's flow for a maximum of 8. This
+        # should give another roughly double the score of other.
+
+        # Get statistics
+        count_another_first = 0
+        for rep in range(0, 100):
+            candidate_generator = blockingCallFromThread(reactor, node.community.score_candidates,
+                                                         [node_other, node_another])
+            if next(candidate_generator) == node_another:
+                count_another_first += 1
+            else:
+                self.assertEqual(next(candidate_generator), node_another)
+
+        # should actually be around 59, but really all we care about is that it is more probable to be generated.
+        self.assertGreater(count_another_first, 50)
+
+    def test_score_candidates_scale(self):
+        """
+        Test what happens when score candidates has a large number of scores to compute against
+        """
+        # Arrange
+        node = self.create_nodes(2)[0]
+        dummies = [''.join([chr(randint(0,255)) for _ in xrange(0, 3)]) for __ in xrange(0, (100 - 1))] + \
+                  [node.my_member.public_key]
+
+        for src in dummies:
+            for _ in xrange(0, 30):
+                dst = choice(dummies)
+                while dst == src:
+                    dst = choice(dummies)
+
+                yin = blockingCallFromThread(reactor, TriblerChainBlock.create, [randint(1, 3000), randint(1, 3000)],
+                                             node.community.persistence, src, None, dst)
+                blockingCallFromThread(reactor, node.community.persistence.add_block, yin)
+                yang = blockingCallFromThread(reactor, TriblerChainBlock.create, [0, 0], node.community.persistence,
+                                              dst, yin)
+                blockingCallFromThread(reactor, node.community.persistence.add_block, yang)
+
+        blockingCallFromThread(reactor, node.community._update_scores, dummies[0:1])
+        self.assertIn(dummies[0:1], node.community.scores)
+        self.assertGreater(node.community.scores[dummies[0:1]], 1000)
+
+    def test_score_candidates_stranger(self):
+        """
+        Test what happens when score candidates is asked to score a stranger
+        """
+        # Arrange
+        node, other = self.create_nodes(2)
+        node_other = self._create_target(node, other)
+
+        # Get statistics
+        count_another_first = 0
+        candidate_generator = blockingCallFromThread(reactor, node.community.score_candidates,
+                                                     [node_other])
+        self.assertEqual(next(candidate_generator), node_other)
+
+    def test_score_candidates_almost_stranger(self):
+        """
+        Test if score candidates eventually generates an almost stranger
+        """
+        # Arrange
+        node, other, another = self.create_nodes(3)
+        node_other = self._create_target(node, other)
+        node_another = self._create_target(node, another)
+        other_another = self._create_target(other, another)
+        TestTriblerChainCommunity.set_expectation(other, node, 50, 50)
+        TestTriblerChainCommunity.set_expectation(another, node, 50, 50)
+        TestTriblerChainCommunity.set_expectation(another, other, 50, 50)
+        transaction = [5, 5]
+        TestTriblerChainCommunity.create_block(node, other, node_other, transaction)
+        transaction = [10, 10]
+        TestTriblerChainCommunity.create_block(other, another, other_another, transaction)
+        # In the situation we have set up, node can only score another by transitive trust between node and other.
+
+        # make sure we have full knowledge of our graph
+        TestTriblerChainCommunity.crawl_node(other, another, other_another, 0)
+        TestTriblerChainCommunity.crawl_node(node, other, node_other, 0)
+        TestTriblerChainCommunity.crawl_node(node, another, node_another, 0)
+
+        # Get statistics
+        candidate_generator = blockingCallFromThread(reactor, node.community.score_candidates,
+                                                     [node_another])
+        self.assertEqual(next(candidate_generator), node_another)
+        self.assertIn(another.my_member.public_key, node.community.scores)
+        self.assertEqual(node.community.scores[another.my_member.public_key], 5.0)

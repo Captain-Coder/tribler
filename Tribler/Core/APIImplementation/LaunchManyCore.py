@@ -96,7 +96,8 @@ class TriblerLaunchMany(TaskManager):
         self.tracker_manager = None
         self.torrent_checker = None
         self.tunnel_community = None
-
+        self.tribler_chain = None
+ 
         self.startup_deferred = Deferred()
 
         self.credit_mining_manager = None

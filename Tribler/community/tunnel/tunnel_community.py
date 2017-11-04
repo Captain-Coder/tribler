@@ -259,9 +259,12 @@ class TunnelSettings(object):
         self.max_packets_without_reply = 50
         self.dht_lookup_interval = 30
 
+        self.enable_trustchain_scoring = False
+
         if tribler_config:
             self.socks_listen_ports = tribler_config.get_tunnel_community_socks5_listen_ports()
             self.become_exitnode = tribler_config.get_tunnel_community_exitnode_enabled()
+            self.enable_trustchain_scoring = tribler_config.get_trustchain_enabled()
         else:
             self.socks_listen_ports = range(1080, 1085)
             self.become_exitnode = False
@@ -557,8 +560,12 @@ class TunnelCommunity(TriblerChainCommunity):
 
     @property
     def compatible_candidates(self):
-        return (c for c in self.dispersy_yield_verified_candidates()
-                if self.crypto.is_key_compatible(c.get_member()._ec))
+        if self.settings.enable_trustchain_scoring:
+            return (c for c in self.tribler_session.lm.tribler_chain.score_candidates(self.dispersy_yield_verified_candidates())
+                    if self.crypto.is_key_compatible(c.get_member()._ec))
+        else:
+            return (c for c in self.dispersy_yield_verified_candidates()
+                    if self.crypto.is_key_compatible(c.get_member()._ec))
 
     def create_circuit(self, goal_hops, ctype=CIRCUIT_TYPE_DATA, required_exit=None):
         """
@@ -984,7 +991,11 @@ class TunnelCommunity(TriblerChainCommunity):
                     if not self.crypto.is_key_compatible(public_key):
                         candidate_list.pop(i)
 
-                pub_key = next(iter(candidate_list), None)
+                if self.settings.enable_trustchain_scoring:
+                    self.tunnel_logger.error("Selecting candidate based on multichain score from list %s" % repr(candidate_list))
+                    pub_key = next(self.tribler_session.lm.tribler_chain.score_candidates(candidate_list))
+                else:
+                    pub_key = next(iter(candidate_list), None)
                 extend_hop_public_bin = pub_key
                 extend_hop_addr = None
 
