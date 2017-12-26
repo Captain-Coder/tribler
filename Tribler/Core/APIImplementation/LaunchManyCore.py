@@ -222,7 +222,7 @@ class TriblerLaunchMany(TaskManager):
         # Tunnel Community
         mc_community = None
         if self.session.config.get_tunnel_community_enabled():
-            tunnel_settings = TunnelSettings(tribler_session=self.session)
+            tunnel_settings = TunnelSettings(tribler_config=self.session.config)
             tunnel_kwargs = {'tribler_session': self.session, 'settings': tunnel_settings}
 
             if self.session.config.get_trustchain_enabled():
