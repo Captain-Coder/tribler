@@ -146,7 +146,6 @@ class HiddenTunnelCommunity(TunnelCommunity):
 
         self.intro_point_for = {}
         self.rendezvous_point_for = {}
-        self.infohash_rp_circuits = defaultdict(list)
         self.infohash_ip_circuits = defaultdict(list)
         self.infohash_pex = defaultdict(set)
 
@@ -705,11 +704,7 @@ class HiddenTunnelCommunity(TunnelCommunity):
                            u'establish-rendezvous', (circuit_id, cache.number, rp.cookie))
 
         # create a new circuit to be used for transferring data
-        circuit_id = self.create_circuit(hops,
-                                         CIRCUIT_TYPE_RP,
-                                         callback,
-                                         info_hash=info_hash)
-        self.infohash_rp_circuits[info_hash].append(circuit_id)
+        self.create_circuit(hops, CIRCUIT_TYPE_RP, callback, info_hash=info_hash)
 
     def check_establish_rendezvous(self, messages):
         for message in messages:
