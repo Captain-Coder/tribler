@@ -608,3 +608,30 @@ class LinkedE2EPayload(Payload):
         @property
         def identifier(self):
             return self._identifier
+
+
+class PaymentRequestPayload(Payload):
+
+    class Implementation(Payload.Implementation):
+
+        def __init__(self, meta, circuit_id, seeder_circuit_length, bytes_up):
+            assert isinstance(circuit_id, (int, long)), type(circuit_id)
+            assert isinstance(seeder_circuit_length, (int, long)), type(seeder_circuit_length)
+            assert isinstance(bytes_up, (int, long)), type(bytes_up)
+
+            super(PaymentRequestPayload.Implementation, self).__init__(meta)
+            self._circuit_id = circuit_id
+            self._seeder_circuit_length = seeder_circuit_length
+            self._bytes_up = bytes_up
+
+        @property
+        def circuit_id(self):
+            return self._circuit_id
+
+        @property
+        def seeder_circuit_length(self):
+            return self._seeder_circuit_length
+
+        @property
+        def bytes_up(self):
+            return self._bytes_up

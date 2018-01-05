@@ -22,13 +22,17 @@ class TriblerChainBlock(TrustChainBlock):
         if link:
             ret.transaction["up"] = link.transaction["down"]
             ret.transaction["down"] = link.transaction["up"]
+            for k, v in link.transaction.iteritems():
+                if k == "up" or k == "down":
+                    continue
+                ret.transaction[k] = v
+
             ret.link_public_key = link.public_key
             ret.link_sequence_number = link.sequence_number
         else:
-            ret.transaction["up"] = transaction["up"]
-            ret.transaction["down"] = transaction["down"]
+            for k, v in transaction.iteritems():
+                ret.transaction[k] = v
             ret.link_public_key = link_pk
-
         if blk:
             ret.transaction["total_up"] = blk.transaction["total_up"] + ret.transaction["up"]
             ret.transaction["total_down"] = blk.transaction["total_down"] + ret.transaction["down"]

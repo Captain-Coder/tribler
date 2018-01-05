@@ -16,7 +16,7 @@ class Circuit(object):
     """ Circuit data structure storing the id, state and hops """
 
     def __init__(self, circuit_id, goal_hops=0, first_hop=None, proxy=None,
-                 ctype=CIRCUIT_TYPE_DATA, required_exit=None, mid=None):
+                 ctype=CIRCUIT_TYPE_DATA, required_exit=None, member=None):
         """
         Instantiate a new Circuit data structure
         :type proxy: TunnelCommunity
@@ -47,7 +47,8 @@ class Circuit(object):
         self.ctype = ctype
         self.created_deferred = Deferred()
         self.required_exit = required_exit
-        self.mid = mid
+        self.mid = member.mid.encode('hex')
+        self.first_hop_pk = member.public_key
         self.hs_session_keys = None
 
         self._logger = logging.getLogger(self.__class__.__name__)

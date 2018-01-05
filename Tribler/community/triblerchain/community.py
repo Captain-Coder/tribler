@@ -1,32 +1,9 @@
-from twisted.internet import reactor
-from twisted.internet.defer import inlineCallbacks
 from twisted.internet.task import LoopingCall
 
-from Tribler.Core.simpledefs import NTFY_TUNNEL, NTFY_REMOVE
 from Tribler.community.triblerchain.block import TriblerChainBlock
 from Tribler.community.triblerchain.database import TriblerChainDB
 from Tribler.community.trustchain.community import TrustChainCommunity
 from Tribler.dispersy.util import blocking_call_on_reactor_thread
-
-MIN_TRANSACTION_SIZE = 1024*1024
-
-
-class PendingBytes(object):
-    def __init__(self, up, down, clean=None):
-        super(PendingBytes, self).__init__()
-        self.up = up
-        self.down = down
-        self.clean = clean
-
-    def add(self, up, down):
-        if self.up + up >= 0 and self.down + down >= 0:
-            self.up = max(0, self.up + up)
-            self.down = max(0, self.down + down)
-            if self.clean is not None:
-                self.clean.reset(2 * 60)
-            return True
-        else:
-            return False
 
 
 class TriblerChainCommunity(TrustChainCommunity):
@@ -39,12 +16,6 @@ class TriblerChainCommunity(TrustChainCommunity):
 
     def __init__(self, *args, **kwargs):
         super(TriblerChainCommunity, self).__init__(*args, **kwargs)
-        self.notifier = None
-
-        # We store the bytes send and received in the tunnel community in a dictionary.
-        # The key is the public key of the peer being interacted with, the value a tuple of the up and down bytes
-        # This data is not used to create outgoing requests, but _only_ to verify incoming requests
-        self.pending_bytes = dict()
 
         # Store invalid messages since one of these might contain a block that is bought on the market
         self.pending_sign_messages = {}
@@ -72,12 +43,6 @@ class TriblerChainCommunity(TrustChainCommunity):
                      "0d11802dc1050a60f6983ac3eedb8172ebc47e3cd50f1d97bfffe187b5"
         return [dispersy.get_member(public_key=master_key.decode("HEX"))]
 
-    def initialize(self, tribler_session=None):
-        super(TriblerChainCommunity, self).initialize(tribler_session)
-        if tribler_session:
-            self.notifier = tribler_session.notifier
-            self.notifier.add_observer(self.on_tunnel_remove, NTFY_TUNNEL, [NTFY_REMOVE])
-
     def received_payment_message(self, payment_id):
         """
         We received a payment message originating from the market community. We set pending bytes so the validator
@@ -88,13 +53,6 @@ class TriblerChainCommunity(TrustChainCommunity):
         """
         pub_key, seq_num, bytes_up, bytes_down = payment_id.split('.')
         pub_key = pub_key.decode('hex')
-        pend = self.pending_bytes.get(pub_key)
-        if not pend:
-            self.pending_bytes[pub_key] = PendingBytes(int(bytes_up),
-                                                       int(bytes_down),
-                                                       None)
-        else:
-            pend.add(int(bytes_up), int(bytes_down))
 
         block_id = "%s.%s" % (pub_key.encode('hex'), seq_num)
         if block_id in self.pending_sign_messages:
@@ -108,17 +66,6 @@ class TriblerChainCommunity(TrustChainCommunity):
         Return whether we should sign the block in the passed message.
         @param message: the message containing a block we want to sign or not.
         """
-        block = message.payload.block
-        pend = self.pending_bytes.get(block.public_key)
-        if not pend or not (pend.up - block.transaction['down'] >= 0 and pend.down - block.transaction['up'] >= 0):
-            self.logger.info("Request block counter party does not have enough bytes pending. U: %d D: %d",
-                             pend.up if pend is not None else 0, pend.down if pend is not None else 0)
-
-            # These bytes might have been bought on the market so we store this message and process it when we
-            # receive a payment message that confirms we have bought these bytes.
-            block_id = "%s.%s" % (block.public_key.encode('hex'), block.sequence_number)
-            self.pending_sign_messages[block_id] = message
-            return False
         return True
 
     @blocking_call_on_reactor_thread
@@ -149,54 +96,6 @@ class TriblerChainCommunity(TrustChainCommunity):
             statistics["total_up"] = 0
             statistics["total_down"] = 0
         return statistics
-
-    @blocking_call_on_reactor_thread
-    def on_tunnel_remove(self, subject, change_type, tunnel, candidate):
-        """
-        Handler for the remove event of a tunnel. This function will attempt to create a block for the amounts that
-        were transferred using the tunnel.
-        :param subject: Category of the notifier event
-        :param change_type: Type of the notifier event
-        :param tunnel: The tunnel that was removed (closed)
-        :param candidate: The dispersy candidate with whom this node has interacted in the tunnel
-        """
-        from Tribler.community.tunnel.tunnel_community import Circuit, RelayRoute, TunnelExitSocket
-        assert isinstance(tunnel, Circuit) or isinstance(tunnel, RelayRoute) or isinstance(tunnel, TunnelExitSocket), \
-            "on_tunnel_remove() was called with an object that is not a Circuit, RelayRoute or TunnelExitSocket"
-        assert isinstance(tunnel.bytes_up, int) and isinstance(tunnel.bytes_down, int),\
-            "tunnel instance must provide byte counts in int"
-
-        up = tunnel.bytes_up
-        down = tunnel.bytes_down
-        pk = candidate.get_member().public_key
-
-        # If the transaction is not big enough we discard the bytes up and down.
-        if up + down >= MIN_TRANSACTION_SIZE:
-            # Tie breaker to prevent both parties from requesting
-            if up > down or (up == down and self.my_member.public_key > pk):
-                self.register_task("sign_%s" % tunnel.circuit_id,
-                                   reactor.callLater(self.SIGN_DELAY, self.sign_block, candidate, pk,
-                                                     {'up': tunnel.bytes_up, 'down': tunnel.bytes_down}))
-            else:
-                pend = self.pending_bytes.get(pk)
-                if not pend:
-                    task = self.register_task("cleanup_pending_%s" % tunnel.circuit_id,
-                                              reactor.callLater(2 * 60, self.cleanup_pending, pk))
-                    self.pending_bytes[pk] = PendingBytes(up, down, task)
-                else:
-                    pend.add(up, down)
-
-    def cleanup_pending(self, public_key):
-        self.pending_bytes.pop(public_key, None)
-
-    @inlineCallbacks
-    def unload_community(self):
-        if self.notifier:
-            self.notifier.remove_observer(self.on_tunnel_remove)
-        for pk in self.pending_bytes:
-            if self.pending_bytes[pk].clean is not None:
-                self.pending_bytes[pk].clean.reset(0)
-        yield super(TriblerChainCommunity, self).unload_community()
 
     def get_trust(self, member):
         """

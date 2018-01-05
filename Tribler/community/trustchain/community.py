@@ -7,6 +7,7 @@ import logging
 from random import randint
 from time import time
 
+from Tribler.Core.simpledefs import NTFY_TRUSTCHAIN, NTFY_SIGN_RESPONSE
 from twisted.internet import reactor
 from twisted.internet.defer import succeed, Deferred, inlineCallbacks
 
@@ -42,6 +43,7 @@ class TrustChainCommunity(Community):
         super(TrustChainCommunity, self).__init__(*args, **kwargs)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.persistence = self.DB_CLASS(self.dispersy.working_directory, self.DB_NAME)
+        self.notifier = None
 
         self._live_edge = []
         self._live_edge_id = 0
@@ -85,6 +87,7 @@ class TrustChainCommunity(Community):
         super(TrustChainCommunity, self).initialize()
         if tribler_session:
             self._live_edges_enabled = tribler_session.config.get_trustchain_live_edges_enabled()
+            self.notifier = tribler_session.notifier
 
     def initiate_meta_messages(self):
         """
@@ -333,6 +336,9 @@ class TrustChainCommunity(Community):
                 self.register_task(crawl_task, reactor.callLater(5.0, self.received_half_block, [message]))
             else:
                 self.sign_block(message.candidate, linked=blk)
+                if self.notifier:
+                    self.notifier.notify(NTFY_TRUSTCHAIN, NTFY_SIGN_RESPONSE, blk)
+
                 if self.is_pending_task_active(crawl_task):
                     self.cancel_pending_task(crawl_task)
                     continue

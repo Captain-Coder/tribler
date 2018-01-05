@@ -53,6 +53,7 @@ NTFY_VOTECAST = 'votecast'
 NTFY_CHANNELCAST = 'channelcast'
 NTFY_TUNNEL = 'tunnel'
 NTFY_TRACKERINFO = 'trackerinfo'
+NTFY_TRUSTCHAIN = 'trustchain'
 
 NTFY_IP_REMOVED = 'intropointremoved'
 NTFY_RP_REMOVED = 'rendezvouspointremoved'
@@ -107,6 +108,7 @@ NTFY_EXTENDED = 'extended'
 NTFY_JOINED = 'joined'
 NTFY_REMOVE = 'remove'
 NTFY_DISCOVERED = 'discovered'
+NTFY_SIGN_RESPONSE = 'signresponse'
 
 # object IDs for NTFY_ACTIVITIES subject
 NTFY_ACT_MEET = 4

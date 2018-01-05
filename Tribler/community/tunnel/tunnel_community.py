@@ -10,6 +10,8 @@ import time
 from collections import defaultdict
 from itertools import chain
 
+from Tribler.Core.simpledefs import NTFY_SIGN_RESPONSE
+from Tribler.Core.simpledefs import NTFY_TRUSTCHAIN
 from cryptography.exceptions import InvalidTag
 from twisted.internet import reactor
 from twisted.internet.defer import maybeDeferred, succeed, inlineCallbacks, returnValue, fail
@@ -344,6 +346,7 @@ class TunnelCommunity(Community):
         if self.tribler_session:
             self.notifier = self.tribler_session.notifier
             self.tribler_session.lm.tunnel_community = self
+            self.tribler_session.add_observer(self.on_triblerchain_block_signed, NTFY_TRUSTCHAIN, [NTFY_SIGN_RESPONSE])
 
     def self_is_connectable(self):
         return self._dispersy._connection_type == u"public"
@@ -458,6 +461,27 @@ class TunnelCommunity(Community):
             circuit_id = random.getrandbits(32)
 
         return circuit_id
+
+    def on_triblerchain_block_signed(self, subject, changetype, block, *args):
+        """
+        We just signed a Triblerchain record. Check whether it contains a circuit_id and if so, propagate the payment.
+        """
+        if 'circuit_id' in block.transaction:
+            circuit_id = block.transaction['circuit_id']
+            if circuit_id not in self.circuits and circuit_id in self.relay_from_to:
+                relay = self.relay_from_to[circuit_id]
+                to_candidate = self.get_candidate(relay.sock_addr)
+                payout_amount = block.transaction['down'] - block.transaction['base_amount']
+                tx = {
+                    'up': 0,
+                    'down': payout_amount,
+                    'circuit_id': relay.circuit_id,
+                    'base_amount': block.transaction['base_amount']
+                }
+                self.tribler_session.lm.triblerchain_community.sign_block(
+                    to_candidate, to_candidate.get_member().public_key, tx)
+            else:
+                self.tunnel_logger.info("Not propagating payment request, no relay found or we are the last hop!")
 
     @call_on_reactor_thread
     def do_circuits(self):
@@ -602,7 +626,7 @@ class TunnelCommunity(Community):
         # Finally, construct the Circuit object and send the CREATE message
         circuit_id = self._generate_circuit_id(first_hop.sock_addr)
         circuit = Circuit(circuit_id, goal_hops, first_hop.sock_addr, self, ctype,
-                          required_exit, first_hop.get_member().mid.encode('hex'))
+                          required_exit, first_hop.get_member())
 
         self.request_cache.add(CircuitRequestCache(self, circuit))
 
@@ -637,35 +661,45 @@ class TunnelCommunity(Community):
         if circuit_id in self.circuits:
             self.tunnel_logger.info("removing circuit %d " + additional_info, circuit_id)
 
-            if destroy:
-                self.destroy_circuit(circuit_id)
+            def do_remove():
+                if destroy:
+                    self.destroy_circuit(circuit_id)
 
-            circuit = self.circuits.pop(circuit_id)
-            if self.notifier:
-                peer = (circuit.first_hop[0], circuit.first_hop[1])
-                from Tribler.Core.simpledefs import NTFY_TUNNEL, NTFY_REMOVE
-                self.notifier.notify(NTFY_TUNNEL, NTFY_REMOVE, circuit, self.copy_shallow_candidate(circuit, peer))
-            circuit.destroy()
+                circuit = self.circuits.pop(circuit_id)
+                if self.notifier:
+                    peer = (circuit.first_hop[0], circuit.first_hop[1])
+                    from Tribler.Core.simpledefs import NTFY_TUNNEL, NTFY_REMOVE
+                    self.notifier.notify(NTFY_TUNNEL, NTFY_REMOVE, circuit, self.copy_shallow_candidate(circuit, peer))
+                circuit.destroy()
 
-            affected_peers = self.socks_server.circuit_dead(circuit)
-            ltmgr = self.tribler_session.lm.ltmgr \
-                if self.tribler_session and self.tribler_session.config.get_libtorrent_enabled() else None
-            if ltmgr:
-                def update_torrents(handle, download):
-                    peers = affected_peers.intersection(handle.get_peer_info())
-                    if peers:
-                        if download not in self.bittorrent_peers:
-                            self.bittorrent_peers[download] = peers
-                        else:
-                            self.bittorrent_peers[download] = peers | self.bittorrent_peers[download]
+                affected_peers = self.socks_server.circuit_dead(circuit)
+                ltmgr = self.tribler_session.lm.ltmgr \
+                    if self.tribler_session and self.tribler_session.config.get_libtorrent_enabled() else None
+                if ltmgr:
+                    def update_torrents(handle, download):
+                        peers = affected_peers.intersection(handle.get_peer_info())
+                        if peers:
+                            if download not in self.bittorrent_peers:
+                                self.bittorrent_peers[download] = peers
+                            else:
+                                self.bittorrent_peers[download] = peers | self.bittorrent_peers[download]
 
-                        # If there are active circuits, add peers immediately. Otherwise postpone.
-                        if self.active_data_circuits():
-                            self.readd_bittorrent_peers()
+                            # If there are active circuits, add peers immediately. Otherwise postpone.
+                            if self.active_data_circuits():
+                                self.readd_bittorrent_peers()
 
-                for d, s in ltmgr.torrents.values():
-                    if s == ltmgr.get_session(d.get_hops()):
-                        d.get_handle().addCallback(update_torrents, d)
+                    for d, s in ltmgr.torrents.values():
+                        if s == ltmgr.get_session(d.get_hops()):
+                            d.get_handle().addCallback(update_torrents, d)
+
+            # We don't immediately remove a rendezvous circuit since a payment message still needs to propagate over it.
+            # We remove other types of circuits immediately.
+            circuit = self.circuits[circuit_id]
+            if circuit.ctype == CIRCUIT_TYPE_RENDEZVOUS:
+                if not self.is_pending_task_active("remove_circuit_%s" % circuit.circuit_id):
+                    self.register_task("remove_circuit_%s" % circuit.circuit_id, reactor.callLater(5, do_remove))
+            else:
+                do_remove()
 
         # Clean up the directions dictionary
         if circuit_id in self.directions:
@@ -684,20 +718,26 @@ class TunnelCommunity(Community):
             self.destroy_relay(to_remove, got_destroy_from=got_destroy_from)
 
         for cid in to_remove:
-            if cid in self.relay_from_to:
-                self.tunnel_logger.info("Removing relay %d %s", cid, additional_info)
-                # Remove the relay
-                relay = self.relay_from_to.pop(cid)
-                if self.notifier:
-                    peer = (relay.sock_addr[0], relay.sock_addr[1])
-                    from Tribler.Core.simpledefs import NTFY_TUNNEL, NTFY_REMOVE
-                    self.notifier.notify(NTFY_TUNNEL, NTFY_REMOVE, relay, self.copy_shallow_candidate(relay, peer))
-                # Remove old session key
-                if cid in self.relay_session_keys:
-                    del self.relay_session_keys[cid]
+            if cid in self.relay_from_to and not self.is_pending_task_active("remove_relay_%s" % cid):
+                # We don't remove the relay immediately but we wait a bit to allow a payment-request and
+                # payment response message to come through.
+                def do_remove(circuit_id_to_remove):
+                    self.tunnel_logger.info("Removing relay %d %s", circuit_id_to_remove, additional_info)
+                    # Remove the relay
+                    relay = self.relay_from_to.pop(circuit_id_to_remove)
+                    if self.notifier:
+                        peer = (relay.sock_addr[0], relay.sock_addr[1])
+                        from Tribler.Core.simpledefs import NTFY_TUNNEL, NTFY_REMOVE
+                        self.notifier.notify(NTFY_TUNNEL, NTFY_REMOVE, relay, self.copy_shallow_candidate(relay, peer))
+                    # Remove old session key
+                    if circuit_id_to_remove in self.relay_session_keys:
+                        del self.relay_session_keys[circuit_id_to_remove]
 
-                if cid in self.directions:
-                    del self.directions[cid]
+                    if circuit_id_to_remove in self.directions:
+                        del self.directions[circuit_id_to_remove]
+
+                self.tunnel_logger.info("Schedule removal of relay %d %s", cid, additional_info)
+                self.register_task("remove_relay_%s" % cid, reactor.callLater(5, do_remove, cid))
             else:
                 self.tunnel_logger.error("Could not remove relay %d %s", circuit_id, additional_info)
 

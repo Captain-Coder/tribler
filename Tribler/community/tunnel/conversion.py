@@ -102,6 +102,10 @@ class TunnelConversion(BinaryConversion):
                                  community.get_meta_message(u"dht-response"),
                                  self._encode_dht_response,
                                  self._decode_dht_response)
+        self.define_meta_message(chr(23),
+                                 community.get_meta_message(u"payment-request"),
+                                 self._encode_payment_request,
+                                 self._decode_payment_request)
 
     def _encode_introduction_response(self, message):
         payload = message.payload
@@ -435,6 +439,15 @@ class TunnelConversion(BinaryConversion):
         offset += len(peers)
 
         return offset, placeholder.meta.payload.implement(circuit_id, identifier, info_hash, peers)
+
+    def _encode_payment_request(self, message):
+        payload = message.payload
+        return pack("!III", payload.circuit_id, payload.seeder_circuit_length, payload.bytes_up),
+
+    def _decode_payment_request(self, placeholder, offset, data):
+        circuit_id, seeder_circuit_length, bytes_up = unpack_from('!III', data, offset)
+        offset += 12
+        return offset, placeholder.meta.payload.implement(circuit_id, seeder_circuit_length, bytes_up)
 
     @staticmethod
     def swap_circuit_id(packet, message_type, old_circuit_id, new_circuit_id):

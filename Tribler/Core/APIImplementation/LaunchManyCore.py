@@ -94,6 +94,7 @@ class TriblerLaunchMany(TaskManager):
         self.tracker_manager = None
         self.torrent_checker = None
         self.tunnel_community = None
+        self.triblerchain_community = None
 
         self.startup_deferred = Deferred()
 
@@ -234,10 +235,10 @@ class TriblerLaunchMany(TaskManager):
                 dispersy_member = self.dispersy.get_member(private_key=keypair.key_to_bin())
 
                 from Tribler.community.triblerchain.community import TriblerChainCommunity
-                mc_community = self.dispersy.define_auto_load(TriblerChainCommunity,
-                                                              dispersy_member,
-                                                              load=True,
-                                                              kargs=trustchain_kwargs)[0]
+                self.triblerchain_community = self.dispersy.define_auto_load(TriblerChainCommunity,
+                                                                             dispersy_member,
+                                                                             load=True,
+                                                                             kargs=trustchain_kwargs)[0]
 
             else:
                 keypair = self.dispersy.crypto.generate_key(u"curve25519")

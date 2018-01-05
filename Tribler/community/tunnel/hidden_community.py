@@ -24,7 +24,7 @@ from Tribler.community.tunnel.payload import (EstablishIntroPayload, IntroEstabl
                                               EstablishRendezvousPayload, RendezvousEstablishedPayload,
                                               KeyResponsePayload, KeyRequestPayload, CreateE2EPayload,
                                               CreatedE2EPayload, LinkE2EPayload, LinkedE2EPayload,
-                                              DHTRequestPayload, DHTResponsePayload)
+                                              DHTRequestPayload, DHTResponsePayload, PaymentRequestPayload)
 from Tribler.community.tunnel.routing import RelayRoute, RendezvousPoint, Hop
 from Tribler.community.tunnel.tunnel_community import TunnelCommunity
 from Tribler.dispersy.authentication import NoAuthentication
@@ -193,9 +193,18 @@ class HiddenTunnelCommunity(TunnelCommunity):
                      self.on_establish_rendezvous),
              Message(self, u"rendezvous-established", NoAuthentication(), PublicResolution(), DirectDistribution(),
                      CandidateDestination(), RendezvousEstablishedPayload(), self.check_rendezvous_established,
-                     self.on_rendezvous_established)]
+                     self.on_rendezvous_established),
+             Message(self, u"payment-request", NoAuthentication(), PublicResolution(), DirectDistribution(),
+                     CandidateDestination(), PaymentRequestPayload(), self._generic_timeline_check,
+                     self.on_payment_request)]
 
     def remove_circuit(self, circuit_id, additional_info='', destroy=False):
+        """
+        Remove a circuit. Before actually removing it, send a payment request over it.
+        """
+        if circuit_id in self.circuits and self.circuits[circuit_id].ctype == CIRCUIT_TYPE_RP:
+            self.send_payment_request(self.circuits[circuit_id])
+
         super(HiddenTunnelCommunity, self).remove_circuit(circuit_id, additional_info, destroy)
 
         if circuit_id in self.my_intro_points:
@@ -209,6 +218,14 @@ class HiddenTunnelCommunity(TunnelCommunity):
                 self.notifier.notify(NTFY_TUNNEL, NTFY_RP_REMOVED, circuit_id)
             self.tunnel_logger.info("removed rendezvous point %d" % circuit_id)
             self.my_download_points.pop(circuit_id)
+
+    def send_payment_request(self, circuit):
+        """
+        Send a payment request over a given circuit
+        """
+        self.tunnel_logger.info("Sending payment request over circuit with id %s", circuit.circuit_id)
+        self.send_cell([Candidate(circuit.first_hop, False)], u"payment-request",
+                       (circuit.circuit_id, circuit.goal_hops, circuit.bytes_up))
 
     def ip_to_circuit_id(self, ip_str):
         return struct.unpack("!I", socket.inet_aton(ip_str))[0]
@@ -731,6 +748,25 @@ class HiddenTunnelCommunity(TunnelCommunity):
             sock_addr = message.payload.rendezvous_point_addr
             rp.rp_info = (sock_addr[0], sock_addr[1], self.crypto.key_to_bin(rp.circuit.hops[-1].public_key))
             rp.finished_callback(rp)
+
+    def on_payment_request(self, messages):
+        for message in messages:
+            self.tunnel_logger.info("Received payment request!")
+            if not self.tribler_session or not self.tribler_session.lm.triblerchain_community:
+                self.tunnel_logger.warning("No tribler session or triblerchain community found!")
+                continue
+
+            circuit = self.circuits[int(message.source[8:])]  # Rendezvous circuit
+            to_candidate = Candidate(circuit.first_hop, False)
+            payout_amount = message.payload.bytes_up * (circuit.goal_hops + message.payload.seeder_circuit_length)
+            tx = {
+                'up': 0,
+                'down': payout_amount,
+                'circuit_id': circuit.circuit_id,
+                'base_amount': message.payload.bytes_up
+            }
+            triblerchain_community = self.tribler_session.lm.triblerchain_community
+            triblerchain_community.sign_block(to_candidate, circuit.first_hop_pk, tx)
 
     def dht_lookup(self, info_hash, cb):
         if self.tribler_session:
