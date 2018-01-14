@@ -278,6 +278,7 @@ class Socks5Connection(Protocol):
         return False
 
     def connectionLost(self, reason=connectionDone):
+        self._logger.error("CONN LOST REAS: %s", reason)
         self.socksserver.connectionLost(self)
 
     def close(self, reason='unspecified'):
