@@ -135,8 +135,8 @@ class TriblerChainCommunity(TrustChainCommunity):
     @blocking_call_on_reactor_thread
     def _update_scores(self, node_pks):
         me = self.my_member.public_key
-        update_pks = [pk for pk in node_pks if pk != me and (
-            pk not in self.scores_last_update or self.scores_last_update[pk] + SCORE_REFRESH_INTERVAL < time())]
+        update_pks = set([pk for pk in node_pks if pk != me and (
+            pk not in self.scores_last_update or self.scores_last_update[pk] + self.SCORE_REFRESH_INTERVAL < time())])
         if len(update_pks) == 0:
             return
 
@@ -161,6 +161,10 @@ class TriblerChainCommunity(TrustChainCommunity):
 
         solver = Popen(["/usr/bin/glpsol", "--lp", "/proc/self/fd/0", "-w", "/proc/self/fd/2"], stdin=PIPE, stderr=PIPE)
 
+        def writelp(output):
+            solver.stdin.write(output)
+            print(output)
+
         def define_constraint(plus, minus=None, value=0, constraint_type='eq'):
             if constraint_type == "ub" and plus is not None and len(plus) == 1 and minus is None:
                 define_variable(plus[0])
@@ -171,7 +175,7 @@ class TriblerChainCommunity(TrustChainCommunity):
                 parts.append(" + ".join([define_variable(name) for name in plus]))
             if minus:
                 parts.append(" - ".join([define_variable(name) for name in minus]))
-            solver.stdin.write("c%s: %s %s %s\n" % (constraints[0], " - ".join(parts),
+            writelp("c%s: %s %s %s\n" % (constraints[0], " - ".join(parts),
                                                     "=" if constraint_type == 'eq' else "<=", value))
             constraints[0] += 1
 
@@ -212,9 +216,9 @@ class TriblerChainCommunity(TrustChainCommunity):
             return
 
         objective = [define_variable("P2_%s" % peer.encode("hex")) for peer in update_pks]
-        solver.stdin.write("Maximize\n")
-        solver.stdin.write(" + ".join(objective))
-        solver.stdin.write("\nSubject To\n")
+        writelp("Maximize\n")
+        writelp(" + ".join(objective))
+        writelp("\nSubject To\n")
 
         for peer in keys:
             if peer != me:
@@ -223,12 +227,12 @@ class TriblerChainCommunity(TrustChainCommunity):
         for peer in update_pks:
             max_flow(graph, peer, me, "P2", "P1")
 
-        solver.stdin.write("Bounds\n")
+        writelp("Bounds\n")
         for key, val in bound.iteritems():
             if val is not None:
-                solver.stdin.write("%s <= %s\n" % (variables[key], val))
+                writelp("%s <= %s\n" % (variables[key], val))
 
-        solver.stdin.write("End\n")
+        writelp("End\n")
         solver.stdin.flush()
         solver.stdin.close()
 

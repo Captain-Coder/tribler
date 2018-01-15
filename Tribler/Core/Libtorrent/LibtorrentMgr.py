@@ -133,6 +133,7 @@ class LibtorrentMgr(TaskManager):
         # the settings dictionary
         settings['outgoing_port'] = 0
         settings['num_outgoing_ports'] = 1
+        settings['dht_bootstrap_nodes'] = ''
 
         # Copy construct so we don't modify the default list
         extensions = list(DEFAULT_LT_EXTENSIONS)
