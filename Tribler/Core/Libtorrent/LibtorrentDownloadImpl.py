@@ -904,7 +904,8 @@ class LibtorrentDownloadImpl(DownloadConfigInterface, TaskManager):
                          'seed': bool(peer_info.flags & peer_info.seed),
                          'upload_only': bool(peer_info.flags & peer_info.upload_only),
                          'rstate': peer_info.read_state,
-                         'wstate': peer_info.write_state}
+                         'wstate': peer_info.write_state,
+                         'raw_peer_info': peer_info}
             peers.append(peer_dict)
         return peers
 

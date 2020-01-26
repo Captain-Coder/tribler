@@ -89,7 +89,7 @@ class LibtorrentMgr(TaskManager):
 
     def initialize(self):
         # start upnp
-        self.get_session().start_upnp()
+        self.get_session() #.start_upnp()
         self.ltsession_metainfo = self.create_session(hops=0, store_listen_port=False)
 
         # make temporary directory for metadata collecting through DHT
@@ -152,6 +152,10 @@ class LibtorrentMgr(TaskManager):
         # the settings dictionary
         settings['outgoing_port'] = 0
         settings['num_outgoing_ports'] = 1
+        settings['enable_upnp'] = False
+        settings['enable_natpmp'] = False
+        settings['out_enc_policy'] = 2
+        settings['in_enc_policy'] = 2
 
         if is_1_1_version:
             settings["dht_bootstrap_nodes"] = ""
@@ -185,7 +189,6 @@ class LibtorrentMgr(TaskManager):
             settings['enable_incoming_tcp'] = False
             settings['anonymous_mode'] = True
             settings['force_proxy'] = True
-            settings["enable_dht"] = False
 
             if is_1_1_version:
                 settings["listen_interfaces"] = "0.0.0.0:%d" % self.tribler_session.config.get_anon_listen_port()
@@ -252,6 +255,8 @@ class LibtorrentMgr(TaskManager):
                 ltsession.apply_settings(ltsession_settings)
             else:
                 ltsession.set_settings(ltsession_settings)
+            if self.tribler_session.config.get_libtorrent_dht_enabled():
+                ltsession.start_dht()
 
         self._logger.debug("Started libtorrent session for %d hops on port %d with settings %s",
                            hops, ltsession.listen_port(), repr(ltsession.get_settings()))
@@ -407,8 +412,8 @@ class LibtorrentMgr(TaskManager):
     def process_alert(self, alert, hops=0):
         alert_type = str(type(alert)).split("'")[1].split(".")[-1]
 
-        if self.alert_callback:
-            self.alert_callback(alert_type, alert)
+        #if self.alert_callback:
+        #    self.alert_callback(alert_type, alert)
 
         # Periodically, libtorrent will send us a state_update_alert, which contains the torrent status of
         # all torrents changed since the last time we received this alert.

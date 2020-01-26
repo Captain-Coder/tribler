@@ -13,7 +13,9 @@ from Tribler.community.triblertunnel.dispatcher import TunnelDispatcher
 from Tribler.Core.simpledefs import NTFY_TUNNEL, NTFY_IP_RECREATE, NTFY_REMOVE, NTFY_EXTENDED, NTFY_CREATED,\
     NTFY_JOINED, DLSTATUS_SEEDING, DLSTATUS_DOWNLOADING, DLSTATUS_STOPPED, DLSTATUS_METADATA
 from Tribler.Core.Socks5.server import Socks5Server
-from Tribler.pyipv8.ipv8.messaging.anonymization.community import message_to_payload, SINGLE_HOP_ENC_PACKETS
+from Tribler.pyipv8.ipv8.messaging.anonymization.community import message_to_payload, SINGLE_HOP_ENC_PACKETS, \
+    tc_lazy_wrapper_unsigned
+from Tribler.pyipv8.ipv8.messaging.deprecated.encoding import decode
 from Tribler.pyipv8.ipv8.messaging.anonymization.hidden_services import HiddenTunnelCommunity
 from Tribler.pyipv8.ipv8.messaging.anonymization.payload import LinkedE2EPayload, DHTResponsePayload
 from Tribler.pyipv8.ipv8.messaging.anonymization.tunnel import CIRCUIT_STATE_READY, CIRCUIT_TYPE_RP, \
@@ -38,6 +40,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         num_random_slots = kwargs.pop('random_slots', 5)
         self.bandwidth_wallet = kwargs.pop('bandwidth_wallet', None)
         socks_listen_ports = kwargs.pop('socks_listen_ports', None)
+        self.annon_seeding_enabled = kwargs.pop('annon_seeding_enabled', True)
         state_path = self.tribler_session.config.get_state_dir() if self.tribler_session else ''
         self.exitnode_cache = kwargs.pop('exitnode_cache', os.path.join(state_path, 'exitnode_cache.dat'))
         super(TriblerTunnelCommunity, self).__init__(*args, **kwargs)
@@ -55,9 +58,11 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         self.bittorrent_peers = {}
         self.dispatcher = TunnelDispatcher(self)
         self.download_states = {}
-        self.competing_slots = [(0, None)] * num_competing_slots  # 1st tuple item = token balance, 2nd = circuit id
+        self.competing_slots = [(-1, None)] * num_competing_slots  # 1st tuple item = token balance, 2nd = circuit id
         self.random_slots = [None] * num_random_slots
         self.reject_callback = None  # This callback is invoked with a tuple (time, balance) when we reject a circuit
+
+        self.logger.debug("Slot counts: compete %s, random %s", len(self.competing_slots), len(self.random_slots))
 
         # Start the SOCKS5 servers
         self.socks_servers = []
@@ -246,6 +251,11 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
                                                                                block_type='tribler_bandwidth')
         if not latest_block:
             latest_block = TriblerBandwidthBlock()
+            self.logger.info("Send balance 0 = (0 - 0)")
+        else:
+            self.logger.info("Send balance %s = (%s - %s)", latest_block.transaction["total_up"] -
+                              latest_block.transaction["total_down"], latest_block.transaction["total_up"],
+                              latest_block.transaction["total_down"])
         latest_block.public_key = EMPTY_PK  # We hide the public key
 
         # We either send the response directly or relay the response to the last verified hop
@@ -346,6 +356,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         payload = PayoutPayload.from_half_block(block, circuit_id, base_amount).to_pack_list()
         packet = self._ez_pack(self._prefix, 23, [payload], False)
         self.send_packet([peer], u"payout", packet)
+        self.logger.info("Signed block to peer (%s) validation result valid", block)
 
     def clean_from_slots(self, circuit_id):
         """
@@ -357,7 +368,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
 
         for ind, tup in enumerate(self.competing_slots):
             if tup[1] == circuit_id:
-                self.competing_slots[ind] = (0, None)
+                self.competing_slots[ind] = (-1, None)
 
     def remove_circuit(self, circuit_id, additional_info='', remove_now=False, destroy=False):
         if circuit_id not in self.circuits:
@@ -388,8 +399,13 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
             # Reset the circuit byte counters so we do not payout again if we receive a destroy message.
             circuit.bytes_up = circuit.bytes_down = 0
 
+        # Now we actually remove the circuit
+        remove_deferred = super(TriblerTunnelCommunity, self)\
+            .remove_circuit(circuit_id, additional_info=additional_info, remove_now=remove_now, destroy=destroy)
+
+        affected_peers = self.dispatcher.circuit_dead(circuit)
+
         def update_torrents(_):
-            affected_peers = self.dispatcher.circuit_dead(circuit)
             ltmgr = self.tribler_session.lm.ltmgr \
                 if self.tribler_session and self.tribler_session.config.get_libtorrent_enabled() else None
             if ltmgr:
@@ -398,10 +414,8 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
                         d.get_handle().addCallback(lambda handle, download=d:
                                                    self.update_torrent(affected_peers, handle, download))
 
-        # Now we actually remove the circuit
-        remove_deferred = super(TriblerTunnelCommunity, self)\
-            .remove_circuit(circuit_id, additional_info=additional_info, remove_now=remove_now, destroy=destroy)
         remove_deferred.addCallback(update_torrents)
+
         return remove_deferred
 
     def remove_relay(self, circuit_id, additional_info='', remove_now=False, destroy=False, got_destroy_from=None,
@@ -529,7 +543,8 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
     def do_raw_dht_lookup(self, lookup_info_hash, info_hash):
         super(TriblerTunnelCommunity, self).do_raw_dht_lookup(lookup_info_hash, info_hash)
 
-        def dht_callback(_, peers, __):
+        def dht_callback(info):
+            _, peers, __ = info
             if not peers:
                 peers = []
             if len(peers) <= 0:
@@ -548,26 +563,42 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         self.logger.info("Doing real dht lookup for real info_hash %s" % info_hash.encode('HEX'))
         self.dht_lookup(info_hash, dht_callback)
 
-    def on_dht_response(self, source_address, data, circuit_id=''):
-        dist, payload = self._ez_unpack_noauth(DHTResponsePayload, data)
-
-        if not self.check_dht_response(payload):
+    @tc_lazy_wrapper_unsigned(DHTResponsePayload)
+    def on_dht_response(self, source_address, payload, circuit_id=None):
+        if not self.is_relay(payload.circuit_id) and not self.request_cache.has(u"dht-request", payload.identifier):
+            self.logger.warning('Got a dht-response with an unknown identifier')
             return
 
+        info_hash = payload.info_hash
+        _, peers = decode(payload.peers)
         cache = self.request_cache.get(u"dht-request", payload.identifier)
+        peers = set(peers)
+        self.logger.info("Received override dht response containing %d peers" % len(peers))
         if not cache.is_real:
-            super(TriblerTunnelCommunity, self).on_dht_response(source_address, data, circuit_id)
+            blacklist = self.dht_blacklist[info_hash]
+
+            # cleanup dht_blacklist
+            for i in xrange(len(blacklist) - 1, -1, -1):
+                if time.time() - blacklist[i][0] > 60:
+                    blacklist.pop(i)
+            exclude = [rp[2] for rp in self.my_download_points.values()] + [sock_addr for _, sock_addr in blacklist]
+            for peer in peers:
+                if peer not in exclude:
+                    self.logger.info("Requesting key from dht peer %s", peer)
+                    # Blacklist this sock_addr for a period of at least 60s
+                    self.dht_blacklist[info_hash].append((time.time(), peer))
+                    self.create_key_request(info_hash, peer)
         else:
-            info_hash = payload.info_hash
-            _, peers = decode(payload.peers)
             download = self.tribler_session.get_download(info_hash)
-            self.logger.info("Received dht response containing %d peers" % len(peers))
             if download:
                 for peer in peers:
-                    self._logger.info("Added real info hash peer looked up in dht (%s)", repr(peer))
+                    self.logger.info("Added real info hash peer looked up in dht (%s)", repr(peer))
                     download.add_peer(peer)
 
     def create_introduction_point(self, info_hash, amount=1):
+        self.logger.info("Is annon seeding enabled:", self.annon_seeding_enabled)
+        if not self.annon_seeding_enabled:
+            return
         download = self.get_download(info_hash)
         if download:
             download.add_peer(('1.1.1.1', 1024))
