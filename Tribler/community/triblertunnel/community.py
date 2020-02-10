@@ -1,7 +1,10 @@
 import os
 import time
 import sys
+import random
 
+from Core.Modules.wallet import tc_wallet
+from Core.Modules.wallet.tc_database_listener import BandwidthDatabaseListener
 from Tribler.community.triblertunnel.caches import BalanceRequestCache
 from Tribler.community.triblertunnel.payload import PayoutPayload, BalanceRequestPayload, BalanceResponsePayload
 from Tribler.Core.Modules.wallet.bandwidth_block import TriblerBandwidthBlock
@@ -59,11 +62,11 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         self.bittorrent_peers = {}
         self.dispatcher = TunnelDispatcher(self)
         self.download_states = {}
-        self.competing_slots = [(-1, None)] * num_competing_slots  # 1st tuple item = token balance, 2nd = circuit id
+        self.competing_slots = [(-1, None, None)] * num_competing_slots  # 1st tuple item = token balance, 2nd = circuit id, 3rd = peer pk
         self.random_slots = [None] * num_random_slots
         self.reject_callback = None  # This callback is invoked with a tuple (time, balance) when we reject a circuit
 
-        self.logger.debug("Slot counts: compete %s, random %s", len(self.competing_slots), len(self.random_slots))
+        self.logger.warning("Slot counts: compete %s, random %s, netflow: %s", len(self.competing_slots), len(self.random_slots), self.netflow_scoring_enabled)
 
         # Start the SOCKS5 servers
         self.socks_servers = []
@@ -140,7 +143,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         for ind, tup in enumerate(self.competing_slots):
             if not tup[1]:
                 # The slot is empty, take it
-                self.competing_slots[ind] = (balance, circuit_id)
+                self.competing_slots[ind] = (balance, circuit_id, None)
                 cache.balance_deferred.callback(True)
                 return
 
@@ -153,7 +156,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
             old_circuit_id = self.competing_slots[lowest_index][1]
             self.logger.info("Kicked out circuit %s (balance: %s) in favor of %s (balance: %s)",
                              old_circuit_id, lowest_balance, circuit_id, balance)
-            self.competing_slots[lowest_index] = (balance, circuit_id)
+            self.competing_slots[lowest_index] = (balance, circuit_id, None)
 
             self.remove_relay(old_circuit_id, destroy=True)
             self.remove_exit_socket(old_circuit_id, destroy=True)
@@ -180,8 +183,28 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
                 self.random_slots[index] = circuit_id
                 return succeed(True)
 
+        # if already in competing slots, reject
+        if len([slot for slot in self.competing_slots if slot[2] == create_payload.node_public_key]) > 0:
+            return succeed(False)
+
+        # if any competing slot is empty take it
+        empty_slot_indices = [ind for ind, tup in enumerate(self.competing_slots) if not tup[1]]
+        if len(empty_slot_indices) > 0:
+            index = random.choice(empty_slot_indices)
+            self.logger.warning("Selecting empty slot %s", index)
+            self.competing_slots[index] = (0, circuit_id, create_payload.node_public_key)
+            return succeed(True)
+
+        self.logger.warning("Netflow? enabled: %s, wallet != None: %s", self.netflow_scoring_enabled, self.bandwidth_wallet is None)
         # No random slots but this user might be allocated a competing slot.
-        # Next, we request the token balance of the circuit initiator.
+        # If netflow is enabled, check if the peer can compete
+        if self.netflow_scoring_enabled and self.bandwidth_wallet:
+            result = self.check_netflow(circuit_id, create_payload.node_public_key)
+            if result:
+                return result
+
+        # If netflow is not enabled or not working we fallback to the old way of balance requests
+        # we request the token balance of the circuit initiator.
         balance_deferred = Deferred()
         self.request_cache.add(BalanceRequestCache(self, circuit_id, balance_deferred))
 
@@ -198,26 +221,45 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
 
         return balance_deferred
 
+    def check_netflow(self, circuit_id, initiating_pk):
+        self.logger.warning("Performing netflow check for PK %s, current slots %r", initiating_pk, self.competing_slots)
+
+        competing_pks = set([tup[2] for tup in self.competing_slots] + [initiating_pk])
+        self.logger.warning("Competing pk's %r", competing_pks)
+        scores = BandwidthDatabaseListener.find_in(self.bandwidth_wallet.trustchain).update_scores(
+            self.my_peer.public_key.key_to_bin(), competing_pks)
+        self.logger.warning("Computed scores %r", scores)
+
+        if len(scores) == 0:
+            self.logger.warning("Netflow failed? Or no score? Fallback to balance request")
+            return None
+
+        initiator_score = [score for score, pk in scores if pk == initiating_pk][0]
+        lowest_score = None
+        for score, pk in scores:
+            if score < initiator_score - 10000 and (lowest_score is None or lowest_score[0] > score):
+                lowest_score = (score, pk)
+
+        if lowest_score is None:
+            # initiating_pk has lowest score, or no tunnel is appicable for pre-empting
+            return succeed(False)
+        else:
+            # initiating_pk is not the lowest score, kill one of the other circuits
+            slot = random.choice([slot for slot in self.competing_slots if slot[2] == lowest_score[1]])
+            self.logger.warning("Victim slot: %r", slot)
+            self.competing_slots.remove(slot)
+            self.competing_slots.append((lowest_score[0], circuit_id, initiating_pk))
+            self.remove_relay(slot[1], destroy=True)
+            self.remove_exit_socket(slot[1], destroy=True)
+            return succeed(True)
+
     def on_payout_block(self, source_address, data):
         if not self.bandwidth_wallet:
             self.logger.warning("Got payout while not having a TrustChain community running!")
             return
 
         payload = self._ez_unpack_noauth(PayoutPayload, data, global_time=False)
-        peer = Peer(payload.public_key, source_address)
-        block = TriblerBandwidthBlock.from_payload(payload, self.serializer)
-        self.bandwidth_wallet.trustchain.process_half_block(block, peer)
-
-        # Send the next payout
-        if payload.circuit_id in self.relay_from_to and block.transaction['down'] > payload.base_amount:
-            relay = self.relay_from_to[payload.circuit_id]
-            circuit_peer = self.get_peer_from_address(relay.peer.address)
-            if not circuit_peer:
-                self.logger.warning("%s Unable to find next peer %s for payout!", self.my_peer, relay.peer)
-                return
-
-            self.do_payout(circuit_peer, relay.circuit_id, block.transaction['down'] - payload.base_amount * 2,
-                           payload.base_amount)
+        self.bandwidth_wallet.trustchain.process_half_block(TriblerBandwidthBlock.from_payload(payload, self.serializer), Peer(payload.public_key, source_address))
 
     def on_balance_request_cell(self, source_address, data, _):
         payload = self._ez_unpack_noauth(BalanceRequestPayload, data, global_time=False)
@@ -335,7 +377,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
 
         return circuit_peer
 
-    def do_payout(self, peer, circuit_id, amount, base_amount):
+    def do_payout(self, peer, circuit_id, down, up):
         """
         Perform a payout to a specific peer.
         :param peer: The peer to perform the payout to, usually the next node in the circuit.
@@ -343,18 +385,22 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         :param amount: The amount to put in the transaction, multiplier of base_amount.
         :param base_amount: The base amount for the payouts.
         """
-        self.logger.info("Sending payout of %d (base: %d) to %s (cid: %s)", amount, base_amount, peer, circuit_id)
+        if down + up < tc_wallet.MIN_TRANSACTION_SIZE:
+            self.logger.info("Transaction to small, not doing payout. d:%d,u:%d to %s (cid: %s)", down, up, peer, circuit_id)
+            return
+
+        self.logger.info("Sending payout of d:%d,u:%d to %s (cid: %s)", down, up, peer, circuit_id)
 
         block = TriblerBandwidthBlock.create(
             'tribler_bandwidth',
-            {'up': 0, 'down': amount},
+            {'up': up, 'down': down},
             self.bandwidth_wallet.trustchain.persistence,
             self.my_peer.public_key.key_to_bin(),
             link_pk=peer.public_key.key_to_bin())
         block.sign(self.my_peer.key)
         self.bandwidth_wallet.trustchain.persistence.add_block(block)
 
-        payload = PayoutPayload.from_half_block(block, circuit_id, base_amount).to_pack_list()
+        payload = PayoutPayload.from_half_block(block, circuit_id, 0).to_pack_list()
         packet = self._ez_pack(self._prefix, 23, [payload], False)
         self.send_packet([peer], u"payout", packet)
         self.logger.info("Signed block to peer (%s) validation result valid", block)
@@ -369,7 +415,7 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
 
         for ind, tup in enumerate(self.competing_slots):
             if tup[1] == circuit_id:
-                self.competing_slots[ind] = (-1, None)
+                self.competing_slots[ind] = (-1, None, None)
 
     def remove_circuit(self, circuit_id, additional_info='', remove_now=False, destroy=False):
         if circuit_id not in self.circuits:
@@ -383,22 +429,16 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
             self.tribler_session.notifier.notify(NTFY_TUNNEL, NTFY_REMOVE, circuit, circuit.peer.address)
 
         circuit_peer = self.get_peer_from_address(circuit.peer.address)
-        if circuit.bytes_down >= 1024 * 1024 and self.bandwidth_wallet and circuit_peer:
+        if circuit.bytes_up < circuit.bytes_down and self.bandwidth_wallet and circuit_peer:
             # We should perform a payout of the removed circuit.
-            if circuit.ctype == CIRCUIT_TYPE_RENDEZVOUS:
-                # We remove an e2e circuit as downloader. We pay the subsequent nodes in the downloader part of the e2e
-                # circuit. In addition, we pay for one hop seeder anonymity since we don't know the circuit length at
-                # the seeder side.
-                self.do_payout(circuit_peer, circuit_id, circuit.bytes_down * ((circuit.goal_hops * 2) + 1),
-                               circuit.bytes_down)
+            self.do_payout(circuit_peer, circuit_id, circuit.bytes_down, circuit.bytes_up)
+        else:
+            self.logger.info("No payout for %d, size d:%d,u:%d, wallet? %s, peer? %s", circuit_id, circuit.bytes_down, circuit.bytes_up, self.bandwidth_wallet is not None, circuit_peer is not None)
+            # TODO: update tc_database_listener with pending bytes
+            pass
 
-            if circuit.ctype == CIRCUIT_TYPE_DATA:
-                # We remove a regular data circuit as downloader. Pay the relay nodes and the exit nodes.
-                self.do_payout(circuit_peer, circuit_id, circuit.bytes_down * (circuit.goal_hops * 2 - 1),
-                               circuit.bytes_down)
-
-            # Reset the circuit byte counters so we do not payout again if we receive a destroy message.
-            circuit.bytes_up = circuit.bytes_down = 0
+        # Reset the circuit byte counters so we do not payout again if we receive a destroy message.
+        circuit.bytes_up = circuit.bytes_down = 0
 
         # Now we actually remove the circuit
         remove_deferred = super(TriblerTunnelCommunity, self)\

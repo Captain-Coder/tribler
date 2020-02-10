@@ -14,7 +14,7 @@ from Tribler.pyipv8.ipv8.peer import Peer
 from Tribler.pyipv8.ipv8.util import addCallback
 
 MEGA_DIV = 1024.0 * 1024.0
-MIN_TRANSACTION_SIZE = 1024 * 1024
+MIN_TRANSACTION_SIZE = 4 * 1024
 
 
 class TrustchainWallet(Wallet, BlockListener):
@@ -40,7 +40,8 @@ class TrustchainWallet(Wallet, BlockListener):
         In our current design, only the person that should pay bytes to others initiates a signing request.
         This is true when considering payouts in the tunnels and when buying bytes on the market.
         """
-        return block.transaction["down"] >= MIN_TRANSACTION_SIZE
+        #TODO: check tc_database_listener for pending bytes
+        return block.transaction["down"] + block.transaction["up"] >= MIN_TRANSACTION_SIZE
 
     def received_block(self, block):
         pass

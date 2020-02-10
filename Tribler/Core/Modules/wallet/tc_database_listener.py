@@ -8,14 +8,21 @@ from pyipv8.ipv8.database import database_blob
 
 class BandwidthDatabaseListener(DatabaseListener):
     CURRENT_VERSION = 1
-    SCORE_REFRESH_INTERVAL = 30 * 60  # update every half hour
+    SCORE_REFRESH_INTERVAL = 30  # update every half hour
 
     def __init__(self, predicate=None, transaction_type=None):
         super(BandwidthDatabaseListener, self).__init__(predicate, transaction_type)
-        # TODO: Fix this memory hole
+        # TODO: Fix this memory leak
         self.scores = dict()
         self.scores_last_update = dict()
 
+    @staticmethod
+    def find_in(tribler_community):
+        items = [listener for listener in tribler_community.persistence.listeners if isinstance(listener, BandwidthDatabaseListener)]
+        if len(items) == 0:
+            return None
+        else:
+            return items[0]
 
     def check_database_version(self, version):
         if version < BandwidthDatabaseListener.CURRENT_VERSION:
@@ -97,7 +104,7 @@ class BandwidthDatabaseListener(DatabaseListener):
     def get_subjective_work_graph(self):
         graph = {}
         db_result = self.database.execute(u"SELECT public_key, link_public_key, SUM(up), SUM(down) FROM tx_bandwidth "
-                                 u"GROUP BY public_key, link_public_key").fetchall()
+                                          u"GROUP BY public_key, link_public_key ORDER BY public_key, link_public_key")
         if db_result:
             for row in db_result:
                 index = (str(row[0]), str(row[1]))
@@ -112,22 +119,27 @@ class BandwidthDatabaseListener(DatabaseListener):
                     graph[index] = (int(row[3]), int(row[2]))
         return graph
 
-
-    def _update_scores(self, me, peer_pks):
+    def update_scores(self, me, peer_pks):
+        self._logger.warning("Updating Netflow scores from %s to %r", me, peer_pks)
         update_pks = [pk for pk in peer_pks if pk != me and (
             pk not in self.scores_last_update or self.scores_last_update[pk] +
             BandwidthDatabaseListener.SCORE_REFRESH_INTERVAL < time())]
+
         if len(update_pks) == 0:
-            return
+            self._logger.warning("All up to date")
+            return sorted([(self.scores.get(pk, 0), pk) for pk in peer_pks])
+
+        self._logger.warning("Netflow: stale %r", update_pks)
 
         # perform pimrank/netflow here to score candidates
         graph = self.get_subjective_work_graph()
-        keys = []
+        self._logger.warning("Netflow: work graph %r", graph)
+        graph_nodes = []
         for k in graph.iterkeys():
-            if k[0] not in keys:
-                keys.append(k[0])
-            if k[1] not in keys:
-                keys.append(k[1])
+            if k[0] not in graph_nodes:
+                graph_nodes.append(k[0])
+            if k[1] not in graph_nodes:
+                graph_nodes.append(k[1])
 
         variables = dict()
         bound = dict()
@@ -135,17 +147,20 @@ class BandwidthDatabaseListener(DatabaseListener):
 
         def define_variable(name):
             if name not in variables:
-                variables[name] = "x%s" % len(variables)
+                #variables[name] = "x%s" % len(variables)
+                variables[name] = name;
                 bound[name] = None
             return variables[name]
 
-        solver = Popen(["/usr/bin/glpsol", "--lp", "/proc/self/fd/0", "-w", "/proc/self/fd/2"], stdin=PIPE, stderr=PIPE)
+        self._logger.warning("Netflow: starting solver")
+        solver = Popen(["/usr/bin/glpsol", "--nomip", "--lp", "/proc/self/fd/0", "-w", "/proc/self/fd/2"], stdin=PIPE, stderr=PIPE)
 
         def writelp(output):
             solver.stdin.write(output)
             print(output)
 
         def define_constraint(plus, minus=None, value=0, constraint_type='eq'):
+            print "constraint plus %r, minus: %r, value %s, type %s" % (plus, minus, value, constraint_type)
             if constraint_type == "ub" and plus is not None and len(plus) == 1 and minus is None:
                 define_variable(plus[0])
                 bound[plus[0]] = value if bound[plus[0]] is None else min(value, bound[plus[0]])
@@ -160,18 +175,19 @@ class BandwidthDatabaseListener(DatabaseListener):
             constraints[0] += 1
 
         def max_flow(g, source, sink, prefix, cap_prefix = None):
-            prefix = "%s_%s" % (prefix, source.encode("hex"))
+            prefix = "%s_%s" % (prefix, source.encode("hex")[-6:])
             for k in g.iterkeys():
-                define_constraint(["%s__%s_%s" % (prefix, k[0].encode("hex"), k[1].encode("hex"))],
+                define_constraint(["%s__%s_%s" % (prefix, k[0].encode("hex")[-6:], k[1].encode("hex")[-6:])],
                                   value=g[k][0], constraint_type='ub')
-            for pk in keys:
+            for pk in graph_nodes:
                 plus = []
                 minus = []
                 for k in g.iterkeys():
                     if k[0] == pk:
-                        plus.append("%s__%s_%s" % (prefix, k[0].encode("hex"), k[1].encode("hex")))
+                        plus.append("%s__%s_%s" % (prefix, k[0].encode("hex")[-6:], k[1].encode("hex")[-6:]))
                     if k[1] == pk:
-                        minus.append("%s__%s_%s" % (prefix, k[0].encode("hex"), k[1].encode("hex")))
+                        minus.append("%s__%s_%s" % (prefix, k[0].encode("hex")[-6:], k[1].encode("hex")[-6:]))
+                print "state prefix: %s, sink %s, pk %s, plus %r, minus %r" % (prefix, sink.encode("hex")[-6:], pk.encode("hex")[-6:], plus, minus)
                 if pk == source:
                     # nothing should flow into the source, sum(minus) = 0
                     define_constraint(plus=minus)
@@ -183,24 +199,21 @@ class BandwidthDatabaseListener(DatabaseListener):
                 else:
                     # in any other node, the flow out (plus) and in (minus) should be balanced
                     define_constraint(plus, minus)
-                    node_cap = "%s_%s" % (cap_prefix, pk.encode("hex"))
+                    node_cap = "%s_%s" % (cap_prefix, pk.encode("hex")[-6:])
                     if node_cap in variables:
                         # if we have a variable for this node's capacity, apply it as max to the flow coming in.
                         # this is where the magic happens, since it is a bound and not an equality, the optimizer might
-                        # need to to only a few steps in the P1 max flow LP problem to verify this P2 flow is indeed
+                        # need to do only a few steps in the P1 max flow LP problem to verify this P2 flow is indeed
                         # possible.
                         define_constraint(plus=minus, minus=[node_cap], constraint_type='ub')
 
-        if len(update_pks) == 0:
-            self._logger.error("Unable to compute NetFlow LP model nothing to compute")
-            return
-
-        objective = [define_variable("P2_%s" % peer.encode("hex")) for peer in update_pks]
+        self._logger.warning("Netflow: generating problem")
+        objective = [define_variable("P2_%s" % peer.encode("hex")[-6:]) for peer in update_pks]
         writelp("Maximize\n")
         writelp(" + ".join(objective))
         writelp("\nSubject To\n")
 
-        for peer in keys:
+        for peer in graph_nodes:
             if peer != me:
                 max_flow(graph, peer, me, "P1")
 
@@ -215,6 +228,7 @@ class BandwidthDatabaseListener(DatabaseListener):
         writelp("End\n")
         solver.stdin.flush()
         solver.stdin.close()
+        self._logger.warning("Netflow: problem generated, waiting for solver")
 
         for peer in update_pks:
             self.scores_last_update[peer] = time()
@@ -229,6 +243,10 @@ class BandwidthDatabaseListener(DatabaseListener):
             self.scores[update_pks[index]] = int(fields[3])
 
         solver.wait()
+        self._logger.warning("Netflow: solver complete")
 
         if solver.returncode != 0:
             self._logger.error("Unable to compute NetFlow LP model (solver exit code %s)" % solver.returncode)
+            return []
+        else:
+            return sorted([(self.scores.get(pk, 0), pk) for pk in peer_pks])
