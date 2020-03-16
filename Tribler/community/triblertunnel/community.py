@@ -3,8 +3,8 @@ import time
 import sys
 import random
 
-from Core.Modules.wallet import tc_wallet
-from Core.Modules.wallet.tc_database_listener import BandwidthDatabaseListener
+from Tribler.Core.Modules.wallet import tc_wallet
+from Tribler.Core.Modules.wallet.tc_database_listener import BandwidthDatabaseListener
 from Tribler.community.triblertunnel.caches import BalanceRequestCache
 from Tribler.community.triblertunnel.payload import PayoutPayload, BalanceRequestPayload, BalanceResponsePayload
 from Tribler.Core.Modules.wallet.bandwidth_block import TriblerBandwidthBlock
@@ -151,6 +151,8 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
                 lowest_balance = tup[0]
                 lowest_index = ind
 
+        self.logger.info("Received balance %d for circuit_id %d, lowest (index: %d, balance: %d)", balance, circuit_id, lowest_index, lowest_balance)
+
         if balance > lowest_balance:
             # We kick this user out
             old_circuit_id = self.competing_slots[lowest_index][1]
@@ -187,14 +189,6 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         if len([slot for slot in self.competing_slots if slot[2] == create_payload.node_public_key]) > 0:
             return succeed(False)
 
-        # if any competing slot is empty take it
-        empty_slot_indices = [ind for ind, tup in enumerate(self.competing_slots) if not tup[1]]
-        if len(empty_slot_indices) > 0:
-            index = random.choice(empty_slot_indices)
-            self.logger.warning("Selecting empty slot %s", index)
-            self.competing_slots[index] = (0, circuit_id, create_payload.node_public_key)
-            return succeed(True)
-
         self.logger.warning("Netflow? enabled: %s, wallet != None: %s", self.netflow_scoring_enabled, self.bandwidth_wallet is None)
         # No random slots but this user might be allocated a competing slot.
         # If netflow is enabled, check if the peer can compete
@@ -218,13 +212,14 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
 
         self.directions.pop(circuit_id, None)
         self.relay_session_keys.pop(circuit_id, None)
+        self.logger.warning("Requesting Balance for circuit %d", circuit_id)
 
         return balance_deferred
 
     def check_netflow(self, circuit_id, initiating_pk):
         self.logger.warning("Performing netflow check for PK %s, current slots %r", initiating_pk, self.competing_slots)
 
-        competing_pks = set([tup[2] for tup in self.competing_slots] + [initiating_pk])
+        competing_pks = set([tup[2] for tup in self.competing_slots if tup[2] is not None] + [initiating_pk])
         self.logger.warning("Competing pk's %r", competing_pks)
         scores = BandwidthDatabaseListener.find_in(self.bandwidth_wallet.trustchain).update_scores(
             self.my_peer.public_key.key_to_bin(), competing_pks)
@@ -235,6 +230,13 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
             return None
 
         initiator_score = [score for score, pk in scores if pk == initiating_pk][0]
+        for ind, tup in enumerate(self.competing_slots):
+            if not tup[1]:
+                # The slot is empty, take it
+                self.logger.warning("Selecting empty slot index %d, slot %r", ind, tup)
+                self.competing_slots[ind] = (initiator_score, circuit_id, initiating_pk)
+                return succeed(True)
+
         lowest_score = None
         for score, pk in scores:
             if score < initiator_score - 10000 and (lowest_score is None or lowest_score[0] > score):
@@ -246,7 +248,8 @@ class TriblerTunnelCommunity(HiddenTunnelCommunity):
         else:
             # initiating_pk is not the lowest score, kill one of the other circuits
             slot = random.choice([slot for slot in self.competing_slots if slot[2] == lowest_score[1]])
-            self.logger.warning("Victim slot: %r", slot)
+            self.logger.info("Kicked out circuit %s (balance: %s) in favor of %s (balance: %s)",
+                             slot[0], lowest_score[0], circuit_id, initiator_score)
             self.competing_slots.remove(slot)
             self.competing_slots.append((lowest_score[0], circuit_id, initiating_pk))
             self.remove_relay(slot[1], destroy=True)

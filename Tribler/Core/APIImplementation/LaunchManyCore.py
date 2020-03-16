@@ -33,6 +33,7 @@ from Tribler.Core.Modules.search_manager import SearchManager
 from Tribler.Core.Modules.versioncheck_manager import VersionCheckManager
 from Tribler.Core.Modules.wallet.dummy_wallet import DummyWallet1, DummyWallet2
 from Tribler.Core.Modules.wallet.tc_wallet import TrustchainWallet
+from Tribler.Core.Modules.wallet.tc_database_listener import BandwidthDatabaseListener
 from Tribler.Core.Modules.watch_folder import WatchFolder
 from Tribler.Core.TorrentChecker.torrent_checker import TorrentChecker
 from Tribler.Core.TorrentDef import TorrentDef, TorrentDefNoMetainfo
@@ -277,6 +278,7 @@ class TriblerLaunchMany(TaskManager):
 
             tc_wallet = TrustchainWallet(self.trustchain_community)
             self.wallets[tc_wallet.get_identifier()] = tc_wallet
+            self.trustchain_community.persistence.add_database_listener(BandwidthDatabaseListener())
 
         # DHT Community
         if self.session.config.get_dht_enabled():

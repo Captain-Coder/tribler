@@ -1,5 +1,6 @@
 from subprocess import Popen, PIPE
 from time import time
+import sys
 
 from pyipv8.ipv8.attestation.trustchain.database_listener import DatabaseListener
 
@@ -10,8 +11,8 @@ class BandwidthDatabaseListener(DatabaseListener):
     CURRENT_VERSION = 1
     SCORE_REFRESH_INTERVAL = 30  # update every half hour
 
-    def __init__(self, predicate=None, transaction_type=None):
-        super(BandwidthDatabaseListener, self).__init__(predicate, transaction_type)
+    def __init__(self):
+        super(BandwidthDatabaseListener, self).__init__(None, b'tribler_bandwidth')
         # TODO: Fix this memory leak
         self.scores = dict()
         self.scores_last_update = dict()
@@ -43,7 +44,8 @@ class BandwidthDatabaseListener(DatabaseListener):
                         ON UPDATE CASCADE ON DELETE CASCADE
                 );
                 
-                CREATE TABLE IF NOT EXISTS bandwidth_balance
+                DROP TABLE IF EXISTS bandwidth_balance;
+                CREATE TABLE bandwidth_balance
                 (
                     public_key           TEXT NOT NULL,
                     
@@ -54,7 +56,6 @@ class BandwidthDatabaseListener(DatabaseListener):
     
                     PRIMARY KEY (public_key)
                 );
-                UPDATE bandwidth_balance SET total_up = 0, total_down = 0;
                 
                 CREATE TRIGGER add_block AFTER INSERT ON tx_bandwidth 
                 FOR EACH ROW
@@ -80,7 +81,9 @@ class BandwidthDatabaseListener(DatabaseListener):
             """)
             # repopulate the tx_bandwidth table and recompute the balances from the blocks table
             for block in self.database.get_all_blocks():
-                self.on_block_added(block)
+                if block.link_sequence_number == 0:
+                    self.on_block_added(block)
+            self.database.commit()
         return BandwidthDatabaseListener.CURRENT_VERSION
 
     INSERT_STATEMENT = u"INSERT INTO tx_bandwidth (public_key, sequence_number, link_public_key, " \
@@ -92,6 +95,7 @@ class BandwidthDatabaseListener(DatabaseListener):
         if not linked:
             self._logger.debug("Linked block not found %s", block)
         else:
+            print "blocks added up to %s" % block.insert_time
             self.database.execute(BandwidthDatabaseListener.INSERT_STATEMENT,
                                   (database_blob(block.public_key), int(block.sequence_number),
                                    database_blob(block.link_public_key), int(block.link_sequence_number),
@@ -120,7 +124,7 @@ class BandwidthDatabaseListener(DatabaseListener):
         return graph
 
     def update_scores(self, me, peer_pks):
-        self._logger.warning("Updating Netflow scores from %s to %r", me, peer_pks)
+        self._logger.warning("Updating Netflow scores from %r to %r", me, peer_pks)
         update_pks = [pk for pk in peer_pks if pk != me and (
             pk not in self.scores_last_update or self.scores_last_update[pk] +
             BandwidthDatabaseListener.SCORE_REFRESH_INTERVAL < time())]
@@ -133,7 +137,6 @@ class BandwidthDatabaseListener(DatabaseListener):
 
         # perform pimrank/netflow here to score candidates
         graph = self.get_subjective_work_graph()
-        self._logger.warning("Netflow: work graph %r", graph)
         graph_nodes = []
         for k in graph.iterkeys():
             if k[0] not in graph_nodes:
@@ -157,10 +160,9 @@ class BandwidthDatabaseListener(DatabaseListener):
 
         def writelp(output):
             solver.stdin.write(output)
-            print(output)
+            #print output
 
         def define_constraint(plus, minus=None, value=0, constraint_type='eq'):
-            print "constraint plus %r, minus: %r, value %s, type %s" % (plus, minus, value, constraint_type)
             if constraint_type == "ub" and plus is not None and len(plus) == 1 and minus is None:
                 define_variable(plus[0])
                 bound[plus[0]] = value if bound[plus[0]] is None else min(value, bound[plus[0]])
@@ -175,19 +177,18 @@ class BandwidthDatabaseListener(DatabaseListener):
             constraints[0] += 1
 
         def max_flow(g, source, sink, prefix, cap_prefix = None):
-            prefix = "%s_%s" % (prefix, source.encode("hex")[-6:])
+            prefix = "%s_%s" % (prefix, source.encode("hex")[-12:])
             for k in g.iterkeys():
-                define_constraint(["%s__%s_%s" % (prefix, k[0].encode("hex")[-6:], k[1].encode("hex")[-6:])],
+                define_constraint(["%s__%s_%s" % (prefix, k[0].encode("hex")[-12:], k[1].encode("hex")[-12:])],
                                   value=g[k][0], constraint_type='ub')
             for pk in graph_nodes:
                 plus = []
                 minus = []
                 for k in g.iterkeys():
                     if k[0] == pk:
-                        plus.append("%s__%s_%s" % (prefix, k[0].encode("hex")[-6:], k[1].encode("hex")[-6:]))
+                        plus.append("%s__%s_%s" % (prefix, k[0].encode("hex")[-12:], k[1].encode("hex")[-12:]))
                     if k[1] == pk:
-                        minus.append("%s__%s_%s" % (prefix, k[0].encode("hex")[-6:], k[1].encode("hex")[-6:]))
-                print "state prefix: %s, sink %s, pk %s, plus %r, minus %r" % (prefix, sink.encode("hex")[-6:], pk.encode("hex")[-6:], plus, minus)
+                        minus.append("%s__%s_%s" % (prefix, k[0].encode("hex")[-12:], k[1].encode("hex")[-12:]))
                 if pk == source:
                     # nothing should flow into the source, sum(minus) = 0
                     define_constraint(plus=minus)
@@ -199,7 +200,7 @@ class BandwidthDatabaseListener(DatabaseListener):
                 else:
                     # in any other node, the flow out (plus) and in (minus) should be balanced
                     define_constraint(plus, minus)
-                    node_cap = "%s_%s" % (cap_prefix, pk.encode("hex")[-6:])
+                    node_cap = "%s_%s" % (cap_prefix, pk.encode("hex")[-12:])
                     if node_cap in variables:
                         # if we have a variable for this node's capacity, apply it as max to the flow coming in.
                         # this is where the magic happens, since it is a bound and not an equality, the optimizer might
@@ -208,17 +209,25 @@ class BandwidthDatabaseListener(DatabaseListener):
                         define_constraint(plus=minus, minus=[node_cap], constraint_type='ub')
 
         self._logger.warning("Netflow: generating problem")
-        objective = [define_variable("P2_%s" % peer.encode("hex")[-6:]) for peer in update_pks]
+        objective = [define_variable("P2_%s" % peer.encode("hex")[-12:]) for peer in update_pks]
         writelp("Maximize\n")
         writelp(" + ".join(objective))
         writelp("\nSubject To\n")
 
+        done = 0
         for peer in graph_nodes:
+            done += 1
             if peer != me:
                 max_flow(graph, peer, me, "P1")
+                print "Phase 1, done: %d/%d" % (done, len(graph_nodes))
+                sys.stdout.flush()
 
+        done = 0
         for peer in update_pks:
             max_flow(graph, peer, me, "P2", "P1")
+            done += 1
+            print "Phase 2, done: %d/%d" % (done, len(update_pks))
+            sys.stdout.flush()
 
         writelp("Bounds\n")
         for key, val in bound.iteritems():
@@ -234,6 +243,7 @@ class BandwidthDatabaseListener(DatabaseListener):
             self.scores_last_update[peer] = time()
 
         for line in solver.stderr:
+            # print line
             fields = line.split(" ")
             if len(fields) < 5 or fields[0] != "j":
                 continue
