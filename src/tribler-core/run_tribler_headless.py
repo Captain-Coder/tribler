@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 """
 This script enables you to start Tribler headless.
 """
